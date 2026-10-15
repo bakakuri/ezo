@@ -1,169 +1,5 @@
 -- ეზო — სქემის ნაწილი 5/8. გაუშვი 4-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ---------------------------------------------------------------------
--- ტურნირები (არენა): დროის ფანჯარაში თამაშობ რამდენიც გინდა, მოგება = 2, ფრე = 1;
--- ზედიზედ ორი მოგების შემდეგ („ცეცხლი“) ქულები ორმაგდება.
--- ---------------------------------------------------------------------
-create table if not exists public.tournaments (
-  id uuid primary key default gen_random_uuid(),
-  type text not null check (type in ('nardi', 'longnardi', 'chess', 'checkers', 'domino', 'durak')),
-  tc text check (tc is null or tc in ('1+0', '3+0', '3+2', '5+0', '10+0')),
-  title text not null check (char_length(title) between 3 and 80),
-  description text not null default '' check (char_length(description) <= 500),
-  starts_at timestamptz not null,
-  ends_at timestamptz not null,
-  created_by uuid references public.profiles on delete set null,
-  group_id uuid references public.groups on delete cascade,
-  created_at timestamptz not null default now(),
-  constraint tournaments_window check (ends_at > starts_at and ends_at - starts_at <= interval '6 hours'),
-  constraint tournaments_tc check (tc is null or type in ('chess', 'checkers'))
-);
-create index if not exists tournaments_time_idx on public.tournaments (ends_at desc);
-
-create table if not exists public.tournament_players (
-  tournament_id uuid references public.tournaments on delete cascade,
-  user_id uuid references public.profiles on delete cascade,
-  score int not null default 0,
-  games int not null default 0,
-  wins int not null default 0,
-  streak int not null default 0,
-  joined_at timestamptz not null default now(),
-  primary key (tournament_id, user_id)
-);
-create index if not exists tournament_players_rank_idx on public.tournament_players (tournament_id, score desc, wins desc);
-
-alter table public.games drop constraint if exists games_tournament_fk;
-alter table public.games add constraint games_tournament_fk foreign key (tournament_id) references public.tournaments on delete set null;
-
-create or replace function public.arena_score(v_g public.games, p_winner uuid)
-returns void language plpgsql security definer set search_path = public as $$
-declare v_end timestamptz; u uuid;
-begin
-  select ends_at into v_end from tournaments where id = v_g.tournament_id;
-  if v_end is null or v_g.created_at >= v_end or v_g.player_b is null then return; end if;
-  foreach u in array array[v_g.player_a, v_g.player_b] loop
-    insert into tournament_players (tournament_id, user_id) values (v_g.tournament_id, u) on conflict do nothing;
-    update tournament_players set
-      score = score + case when p_winner is null then (case when streak >= 2 then 2 else 1 end)
-                           when p_winner = u then (case when streak >= 2 then 4 else 2 end) else 0 end,
-      wins = wins + coalesce(p_winner = u, false)::int,
-      streak = case when p_winner = u then streak + 1 else 0 end,
-      games = games + 1
-     where tournament_id = v_g.tournament_id and user_id = u;
-  end loop;
-end $$;
-
-create or replace function public.can_see_tournament(p_id uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.tournaments t where t.id = p_id and (t.group_id is null or public.can_see_group(t.group_id)));
-$$;
-
-create or replace function public.join_tournament(p_id uuid)
-returns void language plpgsql security definer set search_path = public as $$
-declare v_end timestamptz;
-begin
-  if not public.can_act() then raise exception 'ანგარიში დროებით შეზღუდულია'; end if;
-  if not public.can_see_tournament(p_id) then raise exception 'ტურნირი ვერ მოიძებნა'; end if;
-  select ends_at into v_end from tournaments where id = p_id;
-  if v_end <= now() then raise exception 'ტურნირი დასრულდა'; end if;
-  insert into tournament_players (tournament_id, user_id) values (p_id, auth.uid()) on conflict do nothing;
-end $$;
-
-create or replace function public.leave_tournament(p_id uuid)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  delete from tournament_players where tournament_id = p_id and user_id = auth.uid() and games = 0;
-end $$;
-
-alter table public.tournaments enable row level security;
-alter table public.tournament_players enable row level security;
-drop policy if exists "tournaments read" on public.tournaments;
-drop policy if exists "tournaments create" on public.tournaments;
-drop policy if exists "tournaments delete" on public.tournaments;
-create policy "tournaments read" on public.tournaments for select to authenticated
-  using (group_id is null or public.can_see_group(group_id));
-create policy "tournaments create" on public.tournaments for insert to authenticated
-  with check (created_by = auth.uid() and public.can_act() and starts_at > now() - interval '5 minutes'
-    and (public.is_staff() or (group_id is not null and public.is_group_admin(group_id))));
-create policy "tournaments delete" on public.tournaments for delete to authenticated
-  using (public.is_staff() or (created_by = auth.uid() and starts_at > now()));
-drop policy if exists "tournament players read" on public.tournament_players;
-create policy "tournament players read" on public.tournament_players for select to authenticated
-  using (public.can_see_tournament(tournament_id));
-
-revoke execute on function public.svc_take_seat(uuid, uuid) from public, anon, authenticated;
-revoke execute on function public.svc_take_any_seat(uuid, text) from public, anon, authenticated;
-revoke execute on function public.svc_leave_seat(uuid, uuid) from public, anon, authenticated;
-revoke execute on function public.svc_finish_table(uuid, uuid, text, jsonb) from public, anon, authenticated;
-revoke execute on function public.arena_score(public.games, uuid) from public, anon, authenticated;
-grant execute on function public.svc_take_seat(uuid, uuid) to service_role;
-grant execute on function public.svc_take_any_seat(uuid, text) to service_role;
-grant execute on function public.svc_leave_seat(uuid, uuid) to service_role;
-grant execute on function public.svc_finish_table(uuid, uuid, text, jsonb) to service_role;
-
-do $$ begin
-  begin alter publication supabase_realtime add table public.tournament_players; exception when duplicate_object then null; end;
-end $$;
-
--- ---------------------------------------------------------------------
--- ტურნირის დაწყება/დასრულება: შეტყობინებები, ადგილები, ტაიმერი (pg_cron)
--- ---------------------------------------------------------------------
-alter table public.tournaments add column if not exists start_notified_at timestamptz;
-alter table public.tournaments add column if not exists finished_at timestamptz;
-alter table public.tournament_players add column if not exists place int;
-alter table public.notifications add column if not exists tournament_id uuid references public.tournaments on delete cascade;
-alter table public.notifications add column if not exists data jsonb;
-
--- წუთში ერთხელ (pg_cron) ან ტურნირის გვერდის გახსნისას: აკეთებს მხოლოდ იმას, რისი დროც მოვიდა
-create or replace function public.tournament_tick()
-returns int language plpgsql security definer set search_path = public as $$
-declare t record; n int := 0;
-begin
-  for t in select * from tournaments where start_notified_at is null and starts_at <= now() and ends_at > now()
-           for update skip locked loop
-    update tournaments set start_notified_at = now() where id = t.id;
-    insert into notifications (user_id, actor_id, type, tournament_id, data)
-    select user_id, null, 'tournament_start', t.id, jsonb_build_object('title', t.title, 'game', t.type)
-      from tournament_players where tournament_id = t.id;
-    n := n + 1;
-  end loop;
-
-  for t in select * from tournaments where finished_at is null and ends_at <= now() for update skip locked loop
-    update tournaments set finished_at = now(), start_notified_at = coalesce(start_notified_at, now()) where id = t.id;
-    with ranked as (
-      select user_id, row_number() over (order by score desc, wins desc, joined_at) as place
-        from tournament_players where tournament_id = t.id and games > 0)
-    update tournament_players tp set place = r.place from ranked r
-     where tp.tournament_id = t.id and tp.user_id = r.user_id;
-    insert into notifications (user_id, actor_id, type, tournament_id, data)
-    select tp.user_id, w.user_id, 'tournament_end', t.id, jsonb_build_object(
-             'title', t.title, 'game', t.type, 'place', tp.place, 'score', tp.score,
-             'players', (select count(*) from tournament_players x where x.tournament_id = t.id and x.games > 0))
-      from tournament_players tp
-      left join tournament_players w on w.tournament_id = t.id and w.place = 1
-     where tp.tournament_id = t.id and tp.games > 0;
-    update games set status = 'cancelled', turn = null, updated_at = now() where tournament_id = t.id and status = 'waiting';
-    n := n + 1;
-  end loop;
-  return n;
-end $$;
-revoke execute on function public.tournament_tick() from public, anon;
-grant execute on function public.tournament_tick() to authenticated, service_role;
-
--- ტაიმერი: Supabase-ში ჯერ ჩართე Database → Extensions → pg_cron (თუ ეს ბლოკი ვერ ჩართავს)
-do $$
-begin
-  begin
-    create extension if not exists pg_cron;
-  exception when others then
-    raise notice 'pg_cron მიუწვდომელია — ჩართე Database → Extensions → pg_cron და ფაილი ხელახლა გაუშვი (%)', sqlerrm;
-    return;
-  end;
-  perform cron.schedule('ezo-tournaments', '* * * * *', 'select public.tournament_tick()');
-exception when others then
-  raise notice 'ტურნირების ტაიმერი ვერ ჩაირთო: %', sqlerrm;
-end $$;
-
 -- =====================================================================
 --  v6: სოციალური — დახურული პროფილი, გამოწერის თხოვნები, გამოკითხვები,
 --  შენახული პოსტები და კოლექციები, სთორის ჰაილაითები, „ახლო მეგობრები“
@@ -477,3 +313,194 @@ end $$;
 drop trigger if exists listings_guard on public.listings;
 create trigger listings_guard before insert or update on public.listings
   for each row execute function public.listings_guard();
+
+-- ფასი დაიკლო → ვინც შეინახა, იმას შეტყობინება (თითო განცხადებაზე 12 საათში ერთხელ)
+create or replace function public.on_listing_change()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.status = 'active' and not new.hidden and old.price is not null and new.price is not null
+     and new.price < old.price and new.currency = old.currency then
+    insert into notifications (user_id, actor_id, type, data)
+    select s.user_id, new.seller_id, 'listing_price',
+           jsonb_build_object('listing_id', new.id, 'title', new.title, 'price', new.price, 'old_price', old.price,
+                              'currency', new.currency, 'photo', new.photos ->> 0)
+      from listing_saves s
+     where s.listing_id = new.id and s.user_id <> new.seller_id
+       and not public.is_blocked(s.user_id, new.seller_id)
+       and not exists (select 1 from notifications n where n.user_id = s.user_id and n.type = 'listing_price'
+                         and n.data ->> 'listing_id' = new.id::text and n.created_at > now() - interval '12 hours');
+  end if;
+  return new;
+end $$;
+drop trigger if exists listings_after_update on public.listings;
+create trigger listings_after_update after update of price on public.listings
+  for each row execute function public.on_listing_change();
+
+create or replace function public.on_listing_save()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then update listings set saves_count = saves_count + 1 where id = new.listing_id;
+  else update listings set saves_count = greatest(saves_count - 1, 0) where id = old.listing_id; end if;
+  return null;
+end $$;
+drop trigger if exists listing_saves_count on public.listing_saves;
+create trigger listing_saves_count after insert or delete on public.listing_saves
+  for each row execute function public.on_listing_save();
+
+-- ნახვა: ერთი ადამიანი = ერთი ნახვა, საკუთარი არ ითვლება
+create or replace function public.view_listing(p_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then return; end if;
+  insert into listing_views (listing_id, viewer_id)
+  select l.id, auth.uid() from listings l
+   where l.id = p_id and l.seller_id <> auth.uid() and not l.hidden and not public.is_blocked(auth.uid(), l.seller_id)
+  on conflict do nothing;
+  if found then update listings set views_count = views_count + 1 where id = p_id; end if;
+end $$;
+
+-- აწევა სიის თავში: დღეში ერთხელ
+create or replace function public.bump_listing(p_id uuid)
+returns timestamptz language plpgsql security definer set search_path = public as $$
+declare v listings;
+begin
+  if not public.can_act() then raise exception 'ანგარიში შეზღუდულია'; end if;
+  select * into v from listings where id = p_id and seller_id = auth.uid();
+  if not found then raise exception 'განცხადება ვერ მოიძებნა'; end if;
+  if v.status <> 'active' or v.hidden then raise exception 'მხოლოდ აქტიურ განცხადებას აწევ'; end if;
+  if v.bumped_at > now() - interval '24 hours' then raise exception 'აწევა დღეში ერთხელ შეიძლება'; end if;
+  update listings set bumped_at = now() where id = p_id;
+  return now();
+end $$;
+
+-- გამყიდველის სანდოობა: აქტიური და გაყიდული განცხადებები, ეზოზე რამდენი ხანია
+create or replace function public.seller_stats(p_user uuid)
+returns jsonb language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'active', (select count(*) from listings where seller_id = p_user and status <> 'sold' and not hidden),
+    'sold', (select count(*) from listings where seller_id = p_user and status = 'sold'),
+    'since', (select created_at from profiles where id = p_user));
+$$;
+
+-- ---- RLS
+alter table public.listings enable row level security;
+alter table public.listing_saves enable row level security;
+alter table public.listing_views enable row level security;
+
+drop policy if exists "listings read" on public.listings;
+drop policy if exists "listings create" on public.listings;
+drop policy if exists "listings update own" on public.listings;
+drop policy if exists "listings delete" on public.listings;
+-- დამალული და დაბლოკილი გამყიდველის განცხადებებს მხოლოდ თვითონ და მოდერატორი ხედავს
+create policy "listings read" on public.listings for select to authenticated using (
+  seller_id = auth.uid() or public.is_staff()
+  or (not hidden and not public.is_blocked(auth.uid(), seller_id)
+      and not exists (select 1 from public.profiles p where p.id = seller_id and p.banned_until > now())));
+create policy "listings create" on public.listings for insert to authenticated
+  with check (seller_id = auth.uid() and public.can_act());
+create policy "listings update own" on public.listings for update to authenticated
+  using (seller_id = auth.uid()) with check (seller_id = auth.uid() and public.can_act());
+create policy "listings delete" on public.listings for delete to authenticated
+  using (seller_id = auth.uid() or public.is_staff());
+
+drop policy if exists "listing saves own" on public.listing_saves;
+create policy "listing saves own" on public.listing_saves for all to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid() and exists (select 1 from public.listings l where l.id = listing_id and l.seller_id <> auth.uid()));
+-- listing_views: პოლიტიკა არ აქვს — მხოლოდ view_listing()-ით
+
+revoke execute on function public.listings_guard() from public, anon, authenticated;
+revoke execute on function public.on_listing_change() from public, anon, authenticated;
+revoke execute on function public.on_listing_save() from public, anon, authenticated;
+
+-- =====================================================================
+--  v8: ქულები და მიღწევები — XP, დონეები, დღიური სერია, „ბროწეული“ (შიდა ვალუტა, ფულით არ იყიდება), ბეჯები
+-- =====================================================================
+create table if not exists public.progress (
+  user_id uuid primary key references public.profiles on delete cascade,
+  xp int not null default 0 check (xp >= 0),
+  coins int not null default 0 check (coins >= 0),
+  streak int not null default 0,
+  best_streak int not null default 0,
+  last_day date,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.progress_events (
+  id bigint generated always as identity primary key,
+  user_id uuid not null references public.profiles on delete cascade,
+  kind text not null,
+  xp int not null default 0,
+  coins int not null default 0,
+  ref text,
+  created_at timestamptz not null default now()
+);
+create index if not exists progress_events_user_idx on public.progress_events (user_id, kind, created_at desc);
+create index if not exists progress_events_week_idx on public.progress_events (created_at, user_id) where xp > 0;
+
+-- ბეჯების კატალოგი (სათაურები Push-ისთვის; აღწერა და იკონი — კლიენტში, src/lib/rewards.js)
+create table if not exists public.badges (
+  key text primary key,
+  metric text not null,
+  target int not null,
+  coins int not null,
+  title text not null,
+  sort int not null default 0
+);
+insert into public.badges (key, metric, target, coins, title, sort) values
+  ('first_post', 'posts', 1, 10, 'პირველი სიტყვა', 1),
+  ('posts_50', 'posts', 50, 50, 'მთხრობელი', 2),
+  ('likes_100', 'likes', 100, 40, 'მოსაწონი', 3),
+  ('likes_1000', 'likes', 1000, 150, 'ეზოს ვარსკვლავი', 4),
+  ('followers_50', 'followers', 50, 50, 'ცნობადი სახე', 5),
+  ('streak_7', 'streak', 7, 30, 'ერთი კვირა', 6),
+  ('streak_30', 'streak', 30, 150, 'ერთგული', 7),
+  ('games_10', 'games', 10, 20, 'მოთამაშე', 8),
+  ('wins_50', 'wins', 50, 100, 'ოსტატი', 9),
+  ('champion', 'tourney', 1, 100, 'ჩემპიონი', 10),
+  ('first_sale', 'sales', 1, 20, 'ვაჭარი', 11),
+  ('generous', 'gifts', 10, 30, 'გულუხვი', 12),
+  ('level_10', 'level', 10, 100, 'ეზოს ძველი', 13)
+on conflict (key) do update set metric = excluded.metric, target = excluded.target, coins = excluded.coins, title = excluded.title, sort = excluded.sort;
+
+create table if not exists public.user_badges (
+  user_id uuid references public.profiles on delete cascade,
+  badge text references public.badges on delete cascade,
+  earned_at timestamptz not null default now(),
+  primary key (user_id, badge)
+);
+
+-- დონე n იწყება 50·n·(n−1) XP-დან: 2 → 100, 3 → 300, 5 → 1000, 10 → 4500
+create or replace function public.level_of(p_xp int)
+returns int language sql immutable as $$
+  select greatest(1, floor((1 + sqrt(1 + 0.08 * greatest(p_xp, 0))) / 2)::int);
+$$;
+create or replace function public.tbilisi_today()
+returns date language sql stable as $$ select (now() at time zone 'Asia/Tbilisi')::date; $$;
+create or replace function public.tbilisi_day_start()
+returns timestamptz language sql stable as $$ select (public.tbilisi_today()::timestamp at time zone 'Asia/Tbilisi'); $$;
+
+create or replace function public.badge_metrics(p_user uuid, p_metric text default null)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare m jsonb := '{}'::jsonb;
+begin
+  if p_metric is null or p_metric = 'posts' then
+    m := m || jsonb_build_object('posts', (select count(*) from posts where author_id = p_user and parent_id is null)); end if;
+  if p_metric is null or p_metric = 'likes' then
+    m := m || jsonb_build_object('likes', (select coalesce(sum(like_count), 0) from posts where author_id = p_user)); end if;
+  if p_metric is null or p_metric = 'followers' then
+    m := m || jsonb_build_object('followers', (select followers_count from profiles where id = p_user)); end if;
+  if p_metric is null or p_metric = 'streak' then
+    m := m || jsonb_build_object('streak', (select coalesce(max(best_streak), 0) from progress where user_id = p_user)); end if;
+  if p_metric is null or p_metric in ('games', 'wins') then
+    m := m || (select jsonb_build_object('games', coalesce(sum(wins + losses + draws), 0), 'wins', coalesce(sum(wins), 0)) from game_stats where user_id = p_user); end if;
+  if p_metric is null or p_metric = 'tourney' then
+    m := m || jsonb_build_object('tourney', (select count(*) from tournament_players where user_id = p_user and place = 1)); end if;
+  if p_metric is null or p_metric = 'sales' then
+    m := m || jsonb_build_object('sales', (select count(*) from progress_events where user_id = p_user and kind = 'sale')); end if;
+  if p_metric is null or p_metric = 'gifts' then
+    m := m || jsonb_build_object('gifts', (select count(*) from gifts where from_id = p_user)); end if;
+  if p_metric is null or p_metric = 'level' then
+    m := m || jsonb_build_object('level', (select public.level_of(coalesce(max(xp), 0)) from progress where user_id = p_user)); end if;
+  return m;
+end $$;

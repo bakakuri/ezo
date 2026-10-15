@@ -284,6 +284,12 @@ function EditProfile({ onClose, onSaved }) {
   const [f, setF] = useState({ full_name: me.full_name, bio: me.bio || '', city: me.city || '', school: me.school || '', grad_year: me.grad_year || '', avatar_url: me.avatar_url })
   const [busy, setBusy] = useState(false)
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }))
+  // დაბადების დღე — ცალკე ცხრილში, მხოლოდ თვე და დღე
+  const [bd, setBd] = useState({ month: '', day: '', visible: true })
+  const [bdLoaded, setBdLoaded] = useState(null)
+  useEffect(() => {
+    api.myBirthday().then((b) => { const v = b ? { month: String(b.month), day: String(b.day), visible: b.visible } : { month: '', day: '', visible: true }; setBd(v); setBdLoaded(v) }).catch(() => {})
+  }, [])
   const pick = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -294,6 +300,9 @@ function EditProfile({ onClose, onSaved }) {
     setBusy(true)
     try {
       const np = await api.updateProfile({ ...f, full_name: f.full_name.trim(), grad_year: f.grad_year ? Number(f.grad_year) : null })
+      if (bdLoaded && JSON.stringify(bd) !== JSON.stringify(bdLoaded)) {
+        await api.saveBirthday(bd.month && bd.day ? { month: Number(bd.month), day: Number(bd.day), visible: bd.visible } : null)
+      }
       onSaved(np)
       toast('შენახულია')
       onClose()
@@ -312,10 +321,28 @@ function EditProfile({ onClose, onSaved }) {
         <label className="field"><span>ქალაქი</span><input className="input" value={f.city} onChange={set('city')} /></label>
         <label className="field"><span>სკოლა</span><input className="input" value={f.school} onChange={set('school')} /></label>
         <label className="field"><span>დამთავრების წელი</span><input className="input" inputMode="numeric" maxLength={4} value={f.grad_year} onChange={set('grad_year')} /></label>
+        <fieldset className="field birthday-field">
+          <legend>დაბადების დღე</legend>
+          <div className="hstack" style={{ gap: 8 }}>
+            <select className="input" aria-label="დღე" value={bd.day} onChange={(e) => setBd((b) => ({ ...b, day: e.target.value }))}>
+              <option value="">დღე</option>
+              {Array.from({ length: daysIn(bd.month) }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}
+            </select>
+            <select className="input" aria-label="თვე" value={bd.month} onChange={(e) => setBd((b) => ({ ...b, month: e.target.value, day: Number(b.day) > daysIn(e.target.value) ? '' : b.day }))}>
+              <option value="">თვე</option>
+              {MONTHS_KA.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+            </select>
+          </div>
+          <label className="check-row"><input type="checkbox" checked={bd.visible} onChange={(e) => setBd((b) => ({ ...b, visible: e.target.checked }))} />მეგობრებმა დაბადების დღეს შეიტყონ</label>
+          <small className="faint">წელი არ ინახება. ჩანს მხოლოდ თვითონ დღეს, მეგობრების მთავარ გვერდზე.</small>
+        </fieldset>
       </div>
     </Sheet>
   )
 }
+
+const MONTHS_KA = ['იანვარი', 'თებერვალი', 'მარტი', 'აპრილი', 'მაისი', 'ივნისი', 'ივლისი', 'აგვისტო', 'სექტემბერი', 'ოქტომბერი', 'ნოემბერი', 'დეკემბერი']
+const daysIn = (m) => ({ 2: 29, 4: 30, 6: 30, 9: 30, 11: 30 })[Number(m)] || 31
 
 export function FollowList({ username, which }) {
   const [list, setList] = useState(null)

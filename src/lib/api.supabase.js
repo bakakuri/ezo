@@ -216,14 +216,35 @@ export const api = {
     if (post.parent_id) parent = await this.post(post.parent_id)
     return { post, parent, replies: await withLikes(all.filter((r) => r.parent_id === post.id || r.root_id === post.id)) }
   },
-  async createPost({ body = '', media = [], kind = 'post', parent_id = null, quote_id = null, group_id = null, poll = null }) {
-    const row = ok(await sb.from('posts').insert({ author_id: uid(), body, media, kind, parent_id, quote_id, group_id }).select(POST).single())
+  async createPost({ body = '', media = [], kind = 'post', parent_id = null, quote_id = null, group_id = null, poll = null, link = null }) {
+    const row = ok(await sb.from('posts').insert({ author_id: uid(), body, media, kind, parent_id, quote_id, group_id, link }).select(POST).single())
     if (poll) {
       const closes_at = new Date(Date.now() + (poll.days || 1) * 864e5).toISOString()
       const created = ok(await sb.from('polls').insert({ post_id: row.id, options: poll.options, multi: Boolean(poll.multi), closes_at }).select().single())
       return { ...row, liked: false, saved: false, poll: pollView(created) }
     }
     return { ...row, liked: false, saved: false }
+  },
+  // ტექსტის შესწორება (15 წუთის განმავლობაში — სერვერი ამოწმებს)
+  async editPost(id, body, link) {
+    const row = ok(await sb.from('posts').update(link === undefined ? { body } : { body, link }).eq('id', id).select(POST).single())
+    return (await withLikes([row]))[0]
+  },
+  // ბმულის ბარათი (api/unfurl.js); ვერ მოიძებნა — null
+  async unfurl(url) {
+    try {
+      const r = await fetch(`/api/unfurl?url=${encodeURIComponent(url)}`)
+      return r.ok ? await r.json() : null
+    } catch { return null }
+  },
+  async memories() {
+    return withLikes(ok(await sb.rpc('my_memories').select(POST)))
+  },
+  async celebrations() { return ok(await sb.rpc('celebrations_today')) },
+  async myBirthday() { return ok(await sb.from('birthdays').select('month,day,visible').eq('user_id', uid()).maybeSingle()) },
+  async saveBirthday(b) {
+    if (!b) { ok(await sb.from('birthdays').delete().eq('user_id', uid())); return null }
+    return ok(await sb.from('birthdays').upsert({ user_id: uid(), month: b.month, day: b.day, visible: b.visible !== false }).select('month,day,visible').single())
   },
   async votePoll(postId, options) {
     ok(await sb.rpc('vote_poll', { p_post: postId, p_options: options }))

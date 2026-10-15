@@ -131,7 +131,13 @@ export function ChatRoom({ id }) {
   const [conv, setConv] = useState(undefined)
   const [msgs, setMsgs] = useState(null)
   const [members, setMembers] = useState([])
-  const [text, setText] = useState('')
+  // ?text= — მზა ტექსტი (მაგ. მილოცვა მთავარიდან); ბმულიდან ვაშორებთ, რომ განახლებაზე არ გამეორდეს
+  const [text, setText] = useState(() => (new URLSearchParams(location.search).get('text') || '').slice(0, 500))
+  useEffect(() => {
+    if (!new URLSearchParams(location.search).has('text')) return
+    history.replaceState(history.state, '', location.pathname)
+    setTimeout(() => { const el = inputRef.current; if (el) { el.focus(); el.setSelectionRange?.(el.value.length, el.value.length) } }, 60)
+  }, [])
   const [replyTo, setReplyTo] = useState(null)
   const [typing, setTyping] = useState(false)
   const [rec, setRec] = useState(null)

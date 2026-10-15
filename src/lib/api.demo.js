@@ -97,8 +97,11 @@ const posts = [
   { id: 'p7', author_id: 'u7', body: 'შაშკი რომ რუსული წესებით ითამაშება და დამკა შორს დადის — ეს ვიცოდით, არა? ეზოში სწორედ ასეა.', media: [], created: 800, likes: 19 },
   { id: 'p8', author_id: 'u1', body: 'რთველი კახეთში. ხელები ისევ იისფერი მაქვს. #რთველი #კახეთი', media: [img(1, 'vine'), img(6, 'vine'), img(11, 'still')], created: 1300, likes: 530 },
   { id: 'p9', author_id: 'me', body: 'ეზო გავხსენი. აქ არის ფიდი, ვიდეოები, გაცნობა და ნარდი. დანარჩენს თქვენ გვეტყვით.', media: [], created: 30, likes: 12 },
+  { id: 'p_mem', author_id: 'me', body: 'პირველი ნარდის ტურნირი ვაკის პარკში. ზარი შვიდის ნახევარზე, ფინალი — ბნელში, ფანრებით. #ნარდი', media: [img(4, 'vine')], created: 60 * 24 * 365, likes: 48 },
   { id: 'p10', author_id: 'u2', body: 'ეს აივნები ჩემი ბავშვობაა.', media: [], quote_id: 'p3', created: 150, likes: 22 },
   { id: 'p11', author_id: 'u7', body: 'ეზოში რომელი თამაში დავამატოთ შემდეგ? 🎲', media: [], created: 65, likes: 27 },
+  { id: 'p12', author_id: 'u4', body: '@giorgi ტურნირამდე წესებს გადახედე, აქ კარგად წერია https://ka.wikipedia.org/wiki/ნარდი', media: [], created: 45, likes: 9,
+    link: { url: 'https://ka.wikipedia.org/wiki/%E1%83%9C%E1%83%90%E1%83%A0%E1%83%93%E1%83%98', title: 'ნარდი — ვიკიპედია', description: 'სამაგიდო თამაში ორი მოთამაშისთვის: ქვები, კამათელი და ცოტა იღბალი.', image: art(6, 'still'), site: 'ვიკიპედია' } },
   { id: 'r1', author_id: 'u4', body: '1. ადიში — მყინვარიდან ჩამოსული მდინარე ცხენით უნდა გადალახო.', parent_id: 'p5', created: 419, likes: 40 },
   { id: 'r2', author_id: 'u4', body: '2. ტვიბერის მყინვარი — ბილიკი ნაკლებადაა ცნობილი, ხედი კი ბევრად უკეთესია.', parent_id: 'r1', created: 418, likes: 31 },
   { id: 'r3', author_id: 'u1', body: 'ადიში წელს ორჯერ ვცადე, მეორედ გამოვიდა.', parent_id: 'r1', created: 300, likes: 9 },
@@ -180,6 +183,7 @@ const notifications = [
   { id: 'n1', type: 'like', actor_id: 'u1', post_id: 'p9', created: 5 },
   { id: 'n2', type: 'follow', actor_id: 'u3', created: 40 },
   { id: 'n3', type: 'gift', actor_id: 'u5', created: 70 },
+  { id: 'n_mention', type: 'mention', actor_id: 'u4', post_id: 'p12', created: 45 },
   { id: 'n4', type: 'reply', actor_id: 'u2', post_id: 'p9', created: 120 },
   { id: 'n5', type: 'game_invite', actor_id: 'u2', created: 160 },
   { id: 'n6', type: 'match', actor_id: 'u6', created: 400, read: true },
@@ -353,6 +357,7 @@ const demoInvite = { fresh: false, by: null }
 const bannedWords = ['კაზინო']
 const dismissed = new Set()
 const notifPrefs = { value: null }
+const demoBirthday = { value: null }
 const drafts = [{ id: 'dr1', user_id: 'me', body: 'ხვალ ვაკის პარკში ნარდის ტურნირია — ვინ მოდის? #ნარდი', poll: null, group_id: null, created_at: ago(300), updated_at: ago(45) }]
 // შეცდომების ჟურნალის მაგალითები (ახალი ჩანაწერები ზემოთ)
 const clientErrors = [
@@ -538,12 +543,12 @@ export const api = {
     const desc = posts.filter((p) => p.parent_id === id || (post.root_id === null && p.root_id === id))
     return { post: enrich(post), parent: enrich(posts.find((p) => p.id === post.parent_id)), replies: desc.map(enrich) }
   },
-  async createPost({ body = '', media = [], kind = 'post', parent_id = null, quote_id = null, group_id = null, poll = null }) {
+  async createPost({ body = '', media = [], kind = 'post', parent_id = null, quote_id = null, group_id = null, poll = null, link = null }) {
     if (bannedWords.some((w) => body.toLowerCase().includes(w))) throw new Error('ტექსტი შეიცავს აკრძალულ სიტყვას')
     const parent = parent_id && posts.find((p) => p.id === parent_id)
     const p = {
       id: nid('p'), author_id: ME, body, media, kind: parent ? 'post' : kind, parent_id, quote_id, group_id, hashtags: tagsOf(body),
-      root_id: parent ? parent.root_id || parent.id : null, like_count: 0, reply_count: 0, repost_count: 0, created_at: new Date().toISOString(),
+      root_id: parent ? parent.root_id || parent.id : null, like_count: 0, reply_count: 0, repost_count: 0, created_at: new Date().toISOString(), link,
     }
     posts.unshift(p)
     if (poll) polls.set(p.id, { post_id: p.id, options: poll.options, multi: Boolean(poll.multi), closes_at: new Date(Date.now() + (poll.days || 1) * 864e5).toISOString(), votes: poll.options.map(() => 0), mine: [] })
@@ -553,6 +558,29 @@ export const api = {
     rewards.award(parent ? 'reply' : 'post', parent ? 2 : 5, 0)
     return enrich(p)
   },
+  async editPost(id, body, link) {
+    const p = posts.find((x) => x.id === id && x.author_id === ME)
+    if (!p) throw new Error('პოსტი ვერ მოიძებნა')
+    if (Date.now() - Date.parse(p.created_at) > 15 * 60000) throw new Error('პოსტის შესწორება მხოლოდ გამოქვეყნებიდან 15 წუთის განმავლობაშია შესაძლებელი')
+    if (bannedWords.some((w) => body.toLowerCase().includes(w))) throw new Error('ტექსტი შეიცავს აკრძალულ სიტყვას')
+    Object.assign(p, { body, hashtags: tagsOf(body), edited_at: new Date().toISOString() }, link === undefined ? {} : { link })
+    return enrich(p)
+  },
+  async unfurl(url) {
+    await wait(300)
+    try { const h = new URL(url).hostname.replace(/^www\./, ''); return { url, title: `${h} — გვერდის სათაური`, description: 'დემო რეჟიმში ბმულის ბარათი სანიმუშოა.', image: null, site: h } } catch { return null }
+  },
+  async memories() {
+    const d = new Date()
+    return posts.filter((p) => p.author_id === ME && !p.parent_id && new Date(p.created_at).getMonth() === d.getMonth() && new Date(p.created_at).getDate() === d.getDate() && new Date(p.created_at).getFullYear() < d.getFullYear()).map(enrich)
+  },
+  async celebrations() {
+    const d = new Date()
+    const people = (ids) => ids.map(person).filter(Boolean)
+    return { date: d.toISOString().slice(0, 10), birthdays: people(['u5']), namedays: [{ feast: 'ნინოობა', people: people(['u1']) }], feasts: ['ნინოობა'], mine: { birthday: false, nameday: null } }
+  },
+  async myBirthday() { return demoBirthday.value },
+  async saveBirthday(b) { demoBirthday.value = b ? { visible: true, ...b } : null; return demoBirthday.value },
   async deletePost(id) {
     const i = posts.findIndex((p) => p.id === id)
     if (i >= 0) posts.splice(i, 1)

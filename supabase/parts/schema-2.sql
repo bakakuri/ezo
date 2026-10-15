@@ -1,46 +1,5 @@
 -- ეზო — სქემის ნაწილი 2/8. გაუშვი 1-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create table if not exists public.swipes (
-  swiper_id uuid references public.profiles on delete cascade,
-  target_id uuid references public.profiles on delete cascade,
-  liked boolean not null,
-  created_at timestamptz not null default now(),
-  primary key (swiper_id, target_id),
-  check (swiper_id <> target_id)
-);
-
-create table if not exists public.matches (
-  id uuid primary key default gen_random_uuid(),
-  user_a uuid not null references public.profiles on delete cascade,
-  user_b uuid not null references public.profiles on delete cascade,
-  conversation_id uuid references public.conversations on delete set null,
-  created_at timestamptz not null default now(),
-  unique (user_a, user_b),
-  check (user_a < user_b)
-);
-
-create or replace function public.on_swipe()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_conv uuid; v_a uuid; v_b uuid;
-begin
-  if not new.liked then return new; end if;
-  if exists (select 1 from swipes where swiper_id = new.target_id and target_id = new.swiper_id and liked) then
-    v_a := least(new.swiper_id, new.target_id);
-    v_b := greatest(new.swiper_id, new.target_id);
-    if not exists (select 1 from matches where user_a = v_a and user_b = v_b) then
-      insert into conversations (kind) values ('dating') returning id into v_conv;
-      insert into conversation_members (conversation_id, user_id) values (v_conv, v_a), (v_conv, v_b);
-      insert into matches (user_a, user_b, conversation_id) values (v_a, v_b, v_conv);
-      perform public.notify(new.target_id, new.swiper_id, 'match');
-      perform public.notify(new.swiper_id, new.target_id, 'match');
-    end if;
-  end if;
-  return new;
-end $$;
-drop trigger if exists swipes_after on public.swipes;
-create trigger swipes_after after insert on public.swipes
-  for each row execute function public.on_swipe();
-
 create or replace function public.age_of(d date)
 returns int language sql immutable as $$ select extract(year from age(d))::int $$;
 
@@ -480,3 +439,47 @@ create policy "gifts send" on public.gifts for insert to authenticated with chec
 
 create policy "notifications own" on public.notifications for select to authenticated using (user_id = auth.uid());
 create policy "notifications mark read" on public.notifications for update to authenticated using (user_id = auth.uid());
+
+create policy "conversations members" on public.conversations for select to authenticated using (public.is_member(id));
+create policy "members read" on public.conversation_members for select to authenticated using (public.is_member(conversation_id));
+create policy "messages read" on public.messages for select to authenticated using (public.is_member(conversation_id));
+create policy "messages send" on public.messages for insert to authenticated
+  with check (sender_id = auth.uid() and public.is_member(conversation_id) and public.can_act());
+
+create policy "dating own" on public.dating_profiles for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid() and public.can_act());
+create policy "swipes own insert" on public.swipes for insert to authenticated with check (swiper_id = auth.uid());
+create policy "swipes own read" on public.swipes for select to authenticated using (swiper_id = auth.uid());
+create policy "matches own" on public.matches for select to authenticated using (auth.uid() in (user_a, user_b));
+
+create policy "games read" on public.games for select to authenticated using (true);
+create policy "stats read" on public.game_stats for select to authenticated using (true);
+
+-- ---------------------------------------------------------------------
+-- მედიის საცავი (ფოტო, ვიდეო, ხმოვანი) — თითო მომხმარებელს თავისი საქაღალდე
+-- ---------------------------------------------------------------------
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('media', 'media', true, 52428800)
+on conflict (id) do update set public = true, file_size_limit = 52428800;
+
+drop policy if exists "media read" on storage.objects;
+drop policy if exists "media upload own" on storage.objects;
+drop policy if exists "media delete own" on storage.objects;
+create policy "media read" on storage.objects for select using (bucket_id = 'media');
+create policy "media upload own" on storage.objects for insert to authenticated
+  with check (bucket_id = 'media' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "media delete own" on storage.objects for delete to authenticated
+  using (bucket_id = 'media' and owner = auth.uid());
+
+-- ---------------------------------------------------------------------
+-- Realtime
+-- ---------------------------------------------------------------------
+do $$ begin
+  begin alter publication supabase_realtime add table public.messages; exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.games; exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.notifications; exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.conversations; exception when duplicate_object then null; end;
+end $$;
+
+-- =====================================================================
+--  v2: მოდერაცია, Push შეტყობინებები, თამაშების სერვერი, უსაფრთხოება
+-- =====================================================================

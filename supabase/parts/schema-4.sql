@@ -1,119 +1,5 @@
 -- ეზო — სქემის ნაწილი 4/8. გაუშვი 3-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ---------------------------------------------------------------------
--- v3 RLS
--- ---------------------------------------------------------------------
-alter table public.groups enable row level security;
-alter table public.group_members enable row level security;
-alter table public.events enable row level security;
-alter table public.event_rsvps enable row level security;
-
-drop policy if exists "groups read" on public.groups;
-drop policy if exists "groups create" on public.groups;
-drop policy if exists "groups update admins" on public.groups;
-drop policy if exists "groups delete owner" on public.groups;
-create policy "groups read" on public.groups for select to authenticated using (true);
-create policy "groups create" on public.groups for insert to authenticated with check (owner_id = auth.uid() and public.can_act());
-create policy "groups update admins" on public.groups for update to authenticated using (public.is_group_admin(id)) with check (public.is_group_admin(id));
-create policy "groups delete owner" on public.groups for delete to authenticated using (owner_id = auth.uid());
-
-drop policy if exists "members read" on public.group_members;
-create policy "members read" on public.group_members for select to authenticated using (
-  user_id = auth.uid() or public.is_group_admin(group_id) or (status = 'active' and public.can_see_group(group_id)));
-
-drop policy if exists "events read" on public.events;
-drop policy if exists "events create" on public.events;
-drop policy if exists "events update host" on public.events;
-drop policy if exists "events delete host" on public.events;
-create policy "events read" on public.events for select to authenticated using (public.can_see_group(group_id));
-create policy "events create" on public.events for insert to authenticated
-  with check (host_id = auth.uid() and public.can_act() and (group_id is null or public.is_group_member(group_id)));
-create policy "events update host" on public.events for update to authenticated using (host_id = auth.uid()) with check (host_id = auth.uid());
-create policy "events delete host" on public.events for delete to authenticated using (host_id = auth.uid() or public.is_group_admin(group_id));
-
-drop policy if exists "rsvps read" on public.event_rsvps;
-drop policy if exists "rsvps own" on public.event_rsvps;
-create policy "rsvps read" on public.event_rsvps for select to authenticated using (true);
-create policy "rsvps own" on public.event_rsvps for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-
--- პოსტები: ჯგუფის ხილვადობა და ჯგუფში წერის უფლება
-drop policy if exists "posts read" on public.posts;
-drop policy if exists "posts insert own" on public.posts;
-drop policy if exists "posts delete own" on public.posts;
-create policy "posts read" on public.posts for select to authenticated
-  using (not public.is_blocked(auth.uid(), author_id)
-         and (not hidden or author_id = auth.uid() or public.is_staff())
-         and public.can_see_group(group_id)
-         and (group_id is not null or parent_id is not null or public.can_see_author(author_id)));
-create policy "posts insert own" on public.posts for insert to authenticated
-  with check (author_id = auth.uid() and public.can_act() and (group_id is null or public.is_group_member(group_id)));
-create policy "posts delete own" on public.posts for delete to authenticated
-  using (author_id = auth.uid() or (group_id is not null and public.is_group_admin(group_id)));
-
-revoke execute on function public.on_rsvp_change() from public, anon, authenticated;
-
--- =====================================================================
---  v4: ჯგუფური ჩატები, რეაქციები, პასუხები, ზარები
--- =====================================================================
-create or replace function public.chat_role(p_conv uuid)
-returns text language sql stable security definer set search_path = public as $$
-  select role from public.conversation_members where conversation_id = p_conv and user_id = auth.uid();
-$$;
-
--- პასუხი მხოლოდ იმავე ჩატის მესიჯზე
-create or replace function public.before_message_insert()
-returns trigger language plpgsql security invoker set search_path = public as $$
-declare v_lid uuid;
-begin
-  if new.reply_to is not null and not exists (select 1 from messages where id = new.reply_to and conversation_id = new.conversation_id) then
-    new.reply_to := null;
-  end if;
-  if current_user in ('authenticated', 'anon') then
-    new.deleted_at := null;
-    new.meta := new.meta - 'call' - 'system';
-  end if;
-  -- განცხადების ბარათი: მონაცემები ყოველთვის ბაზიდან (გაყალბება შეუძლებელია)
-  if new.meta ? 'listing' then
-    begin v_lid := (new.meta -> 'listing' ->> 'id')::uuid; exception when others then v_lid := null; end;
-    new.meta := (new.meta - 'listing') || coalesce((
-      select jsonb_build_object('listing', jsonb_build_object('id', l.id, 'title', l.title, 'price', l.price,
-               'currency', l.currency, 'photo', l.photos ->> 0, 'seller_id', l.seller_id))
-        from listings l where l.id = v_lid), '{}'::jsonb);
-  end if;
-  return new;
-end $$;
-drop trigger if exists messages_before_insert on public.messages;
-create trigger messages_before_insert before insert on public.messages
-  for each row execute function public.before_message_insert();
-
-create or replace function public.delete_message(p_id uuid)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  update messages set body = '', media_url = null, media_type = null, meta = '{}'::jsonb, deleted_at = now()
-   where id = p_id and sender_id = auth.uid() and deleted_at is null;
-  if not found then raise exception 'მესიჯის წაშლა ვერ მოხერხდა'; end if;
-end $$;
-
-create table if not exists public.message_reactions (
-  message_id uuid references public.messages on delete cascade,
-  user_id uuid references public.profiles on delete cascade,
-  conversation_id uuid references public.conversations on delete cascade,
-  emoji text not null check (char_length(emoji) between 1 and 8),
-  created_at timestamptz not null default now(),
-  primary key (message_id, user_id)
-);
-create index if not exists reactions_conv_idx on public.message_reactions (conversation_id);
-
-create or replace function public.before_reaction()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  select conversation_id into new.conversation_id from messages where id = new.message_id;
-  return new;
-end $$;
-drop trigger if exists reactions_before on public.message_reactions;
-create trigger reactions_before before insert or update on public.message_reactions
-  for each row execute function public.before_reaction();
-
 create or replace function public.create_group_chat(p_title text, p_members uuid[])
 returns uuid language plpgsql security definer set search_path = public as $$
 declare v_id uuid; v_user uuid; v_title text := btrim(coalesce(p_title, ''));
@@ -411,4 +297,168 @@ begin
     draws = gs.draws + (p_result = 'jokerdraw')::int,
     losses = gs.losses + (p_result <> 'jokerdraw' and not coalesce(gs.user_id = p_winner, false))::int
    where gs.type = v_g.type and gs.user_id in (select key::uuid from jsonb_each(p_scores));
+end $$;
+
+-- ---------------------------------------------------------------------
+-- ტურნირები (არენა): დროის ფანჯარაში თამაშობ რამდენიც გინდა, მოგება = 2, ფრე = 1;
+-- ზედიზედ ორი მოგების შემდეგ („ცეცხლი“) ქულები ორმაგდება.
+-- ---------------------------------------------------------------------
+create table if not exists public.tournaments (
+  id uuid primary key default gen_random_uuid(),
+  type text not null check (type in ('nardi', 'longnardi', 'chess', 'checkers', 'domino', 'durak')),
+  tc text check (tc is null or tc in ('1+0', '3+0', '3+2', '5+0', '10+0')),
+  title text not null check (char_length(title) between 3 and 80),
+  description text not null default '' check (char_length(description) <= 500),
+  starts_at timestamptz not null,
+  ends_at timestamptz not null,
+  created_by uuid references public.profiles on delete set null,
+  group_id uuid references public.groups on delete cascade,
+  created_at timestamptz not null default now(),
+  constraint tournaments_window check (ends_at > starts_at and ends_at - starts_at <= interval '6 hours'),
+  constraint tournaments_tc check (tc is null or type in ('chess', 'checkers'))
+);
+create index if not exists tournaments_time_idx on public.tournaments (ends_at desc);
+
+create table if not exists public.tournament_players (
+  tournament_id uuid references public.tournaments on delete cascade,
+  user_id uuid references public.profiles on delete cascade,
+  score int not null default 0,
+  games int not null default 0,
+  wins int not null default 0,
+  streak int not null default 0,
+  joined_at timestamptz not null default now(),
+  primary key (tournament_id, user_id)
+);
+create index if not exists tournament_players_rank_idx on public.tournament_players (tournament_id, score desc, wins desc);
+
+alter table public.games drop constraint if exists games_tournament_fk;
+alter table public.games add constraint games_tournament_fk foreign key (tournament_id) references public.tournaments on delete set null;
+
+create or replace function public.arena_score(v_g public.games, p_winner uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_end timestamptz; u uuid;
+begin
+  select ends_at into v_end from tournaments where id = v_g.tournament_id;
+  if v_end is null or v_g.created_at >= v_end or v_g.player_b is null then return; end if;
+  foreach u in array array[v_g.player_a, v_g.player_b] loop
+    insert into tournament_players (tournament_id, user_id) values (v_g.tournament_id, u) on conflict do nothing;
+    update tournament_players set
+      score = score + case when p_winner is null then (case when streak >= 2 then 2 else 1 end)
+                           when p_winner = u then (case when streak >= 2 then 4 else 2 end) else 0 end,
+      wins = wins + coalesce(p_winner = u, false)::int,
+      streak = case when p_winner = u then streak + 1 else 0 end,
+      games = games + 1
+     where tournament_id = v_g.tournament_id and user_id = u;
+  end loop;
+end $$;
+
+create or replace function public.can_see_tournament(p_id uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.tournaments t where t.id = p_id and (t.group_id is null or public.can_see_group(t.group_id)));
+$$;
+
+create or replace function public.join_tournament(p_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_end timestamptz;
+begin
+  if not public.can_act() then raise exception 'ანგარიში დროებით შეზღუდულია'; end if;
+  if not public.can_see_tournament(p_id) then raise exception 'ტურნირი ვერ მოიძებნა'; end if;
+  select ends_at into v_end from tournaments where id = p_id;
+  if v_end <= now() then raise exception 'ტურნირი დასრულდა'; end if;
+  insert into tournament_players (tournament_id, user_id) values (p_id, auth.uid()) on conflict do nothing;
+end $$;
+
+create or replace function public.leave_tournament(p_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  delete from tournament_players where tournament_id = p_id and user_id = auth.uid() and games = 0;
+end $$;
+
+alter table public.tournaments enable row level security;
+alter table public.tournament_players enable row level security;
+drop policy if exists "tournaments read" on public.tournaments;
+drop policy if exists "tournaments create" on public.tournaments;
+drop policy if exists "tournaments delete" on public.tournaments;
+create policy "tournaments read" on public.tournaments for select to authenticated
+  using (group_id is null or public.can_see_group(group_id));
+create policy "tournaments create" on public.tournaments for insert to authenticated
+  with check (created_by = auth.uid() and public.can_act() and starts_at > now() - interval '5 minutes'
+    and (public.is_staff() or (group_id is not null and public.is_group_admin(group_id))));
+create policy "tournaments delete" on public.tournaments for delete to authenticated
+  using (public.is_staff() or (created_by = auth.uid() and starts_at > now()));
+drop policy if exists "tournament players read" on public.tournament_players;
+create policy "tournament players read" on public.tournament_players for select to authenticated
+  using (public.can_see_tournament(tournament_id));
+
+revoke execute on function public.svc_take_seat(uuid, uuid) from public, anon, authenticated;
+revoke execute on function public.svc_take_any_seat(uuid, text) from public, anon, authenticated;
+revoke execute on function public.svc_leave_seat(uuid, uuid) from public, anon, authenticated;
+revoke execute on function public.svc_finish_table(uuid, uuid, text, jsonb) from public, anon, authenticated;
+revoke execute on function public.arena_score(public.games, uuid) from public, anon, authenticated;
+grant execute on function public.svc_take_seat(uuid, uuid) to service_role;
+grant execute on function public.svc_take_any_seat(uuid, text) to service_role;
+grant execute on function public.svc_leave_seat(uuid, uuid) to service_role;
+grant execute on function public.svc_finish_table(uuid, uuid, text, jsonb) to service_role;
+
+do $$ begin
+  begin alter publication supabase_realtime add table public.tournament_players; exception when duplicate_object then null; end;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- ტურნირის დაწყება/დასრულება: შეტყობინებები, ადგილები, ტაიმერი (pg_cron)
+-- ---------------------------------------------------------------------
+alter table public.tournaments add column if not exists start_notified_at timestamptz;
+alter table public.tournaments add column if not exists finished_at timestamptz;
+alter table public.tournament_players add column if not exists place int;
+alter table public.notifications add column if not exists tournament_id uuid references public.tournaments on delete cascade;
+alter table public.notifications add column if not exists data jsonb;
+
+-- წუთში ერთხელ (pg_cron) ან ტურნირის გვერდის გახსნისას: აკეთებს მხოლოდ იმას, რისი დროც მოვიდა
+create or replace function public.tournament_tick()
+returns int language plpgsql security definer set search_path = public as $$
+declare t record; n int := 0;
+begin
+  for t in select * from tournaments where start_notified_at is null and starts_at <= now() and ends_at > now()
+           for update skip locked loop
+    update tournaments set start_notified_at = now() where id = t.id;
+    insert into notifications (user_id, actor_id, type, tournament_id, data)
+    select user_id, null, 'tournament_start', t.id, jsonb_build_object('title', t.title, 'game', t.type)
+      from tournament_players where tournament_id = t.id;
+    n := n + 1;
+  end loop;
+
+  for t in select * from tournaments where finished_at is null and ends_at <= now() for update skip locked loop
+    update tournaments set finished_at = now(), start_notified_at = coalesce(start_notified_at, now()) where id = t.id;
+    with ranked as (
+      select user_id, row_number() over (order by score desc, wins desc, joined_at) as place
+        from tournament_players where tournament_id = t.id and games > 0)
+    update tournament_players tp set place = r.place from ranked r
+     where tp.tournament_id = t.id and tp.user_id = r.user_id;
+    insert into notifications (user_id, actor_id, type, tournament_id, data)
+    select tp.user_id, w.user_id, 'tournament_end', t.id, jsonb_build_object(
+             'title', t.title, 'game', t.type, 'place', tp.place, 'score', tp.score,
+             'players', (select count(*) from tournament_players x where x.tournament_id = t.id and x.games > 0))
+      from tournament_players tp
+      left join tournament_players w on w.tournament_id = t.id and w.place = 1
+     where tp.tournament_id = t.id and tp.games > 0;
+    update games set status = 'cancelled', turn = null, updated_at = now() where tournament_id = t.id and status = 'waiting';
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+revoke execute on function public.tournament_tick() from public, anon;
+grant execute on function public.tournament_tick() to authenticated, service_role;
+
+-- ტაიმერი: Supabase-ში ჯერ ჩართე Database → Extensions → pg_cron (თუ ეს ბლოკი ვერ ჩართავს)
+do $$
+begin
+  begin
+    create extension if not exists pg_cron;
+  exception when others then
+    raise notice 'pg_cron მიუწვდომელია — ჩართე Database → Extensions → pg_cron და ფაილი ხელახლა გაუშვი (%)', sqlerrm;
+    return;
+  end;
+  perform cron.schedule('ezo-tournaments', '* * * * *', 'select public.tournament_tick()');
+exception when others then
+  raise notice 'ტურნირების ტაიმერი ვერ ჩაირთო: %', sqlerrm;
 end $$;

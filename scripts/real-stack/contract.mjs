@@ -280,6 +280,39 @@ await step('A (admin): analytics; B forbidden', async () => {
   await B.adminAnalytics(30).then(() => { throw new Error('non-admin analytics') }, (e) => must(/forbidden/.test(e.message), e.message))
 })
 
+// ---- ეტაპი E: მოხსენიება, რედაქტირება, ბმულის ბარათი, დაბადების დღე, მოგონებები
+await step('B: @mention → A notified; edit within 15 min; link card saved', async () => {
+  const p = await B.createPost({ body: `@${ua} ნახე https://example.com/x`, link: { url: 'https://example.com/x', title: 'მაგალითი', description: '', image: null, site: 'example.com' } })
+  must(p?.link?.title === 'მაგალითი', 'link not saved')
+  must((await A.notifications()).some((n) => n.type === 'mention' && n.post_id === p.id && n.actor?.username === ub), 'mention notification missing')
+  const e = await B.editPost(p.id, `@${ua} შესწორებული ტექსტი`)
+  must(e.body.includes('შესწორებული') && e.edited_at && e.liked === false, 'edit ' + JSON.stringify(e).slice(0, 160))
+  must((await A.notifications()).filter((n) => n.type === 'mention' && n.post_id === p.id).length === 1, 'mention repeated on edit')
+  sql(`update public.posts set created_at = now() - interval '20 minutes' where id = '${p.id}'`)
+  await B.editPost(p.id, 'გვიან').then(() => { throw new Error('late edit allowed') }, (er) => must(/15 წუთ/.test(er.message), er.message))
+  await B.createPost({ body: 'x', link: { url: 'javascript:alert(1)', title: 'x' } }).then(() => { throw new Error('bad link accepted') }, () => {})
+})
+await step('A: birthday save/read; B sees it today; hidden → not shown', async () => {
+  const [m, d] = sql(`select to_char(now() at time zone 'Asia/Tbilisi', 'FMMM FMDD')`).split(' ').map(Number)
+  must((await A.myBirthday()) === null, 'expected none')
+  const b = await A.saveBirthday({ month: m, day: d, visible: true })
+  must(b.month === m && b.day === d && b.visible === true, 'saved ' + JSON.stringify(b))
+  must((await B.celebrations()).birthdays.some((p) => p.username === ua), 'B does not see A birthday')
+  must((await A.celebrations()).mine.birthday === true, 'mine.birthday')
+  await A.saveBirthday({ month: m, day: d, visible: false })
+  must(!(await B.celebrations()).birthdays.some((p) => p.username === ua), 'hidden birthday visible')
+  must(sql(`select count(*) from public.birthdays where user_id = '${pa.id}'`) === '1', 'row missing')
+  await A.saveBirthday(null)
+  must((await A.myBirthday()) === null, 'not deleted')
+})
+await step('A: memories — post from a year ago', async () => {
+  const p = await A.createPost({ body: 'შარშანდელი პოსტი' })
+  sql(`update public.posts set created_at = now() - interval '1 year' where id = '${p.id}'`)
+  const list = await A.memories()
+  must(list.some((x) => x.id === p.id && x.author?.username === ua), 'memory missing')
+  must(!(await B.memories()).some((x) => x.id === p.id), 'B sees A memory')
+})
+
 // ---- საჯარო ფუნქციები anon გასაღებით (Vercel-ის og.js და sitemap.js ასე იძახებს)
 await step('anon: og_preview + sitemap_entries', async () => {
   const keys = Object.fromEntries(readFileSync(`${OUT}/keys.env`, 'utf8').trim().split('\n').map((l) => l.split('=')))

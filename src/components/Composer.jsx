@@ -1,11 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Sheet, Avatar } from './ui.jsx'
 import { Icon } from './Icon.jsx'
 import { api } from '../lib/api.js'
 import { useAuth } from '../lib/auth.jsx'
 import { useToast } from './Toast.jsx'
 import { compressImage, mediaDims, checkFile } from '../lib/media.js'
-import { QuoteCard } from './PostCard.jsx'
+import { QuoteCard, LinkCard } from './PostCard.jsx'
+import { firstUrl } from '../lib/links.js'
 import { PollEditor, pollReady } from './PostExtras.jsx'
 import { navigate } from '../lib/router.jsx'
 import { timeAgo } from '../lib/format.js'
@@ -67,10 +68,13 @@ function CreateChooser({ onClose, onPick }) {
   )
 }
 
-function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', withPoll = false, onClose }) {
+// @მოხსენიება კურსორთან: „…@nin|“ → 'nin'
+const MENTION_AT = /(^|[^A-Za-z0-9_.@])@([A-Za-z0-9_.]{0,24})$/
+
+function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', withPoll = false, edit = null, onSaved, onClose }) {
   const { me } = useAuth()
   const toast = useToast()
-  const [text, setText] = useState(prefill)
+  const [text, setText] = useState(edit ? edit.body || '' : prefill)
   const [files, setFiles] = useState([]) // { file, url }
   const [busy, setBusy] = useState(false)
   const [poll, setPoll] = useState(withPoll ? { options: ['', ''], days: 1, multi: false } : null)
@@ -78,13 +82,76 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
   const ta = useRef(null)
   const isReel = kind === 'reel'
   // მონახაზები: მხოლოდ ჩვეულებრივ პოსტზე (არა პასუხი, ციტატა ან ვიდეო)
-  const draftable = !parent && !quote && !isReel
+  const draftable = !parent && !quote && !isReel && !edit
   const [draftId, setDraftId] = useState(null)
   const [drafts, setDrafts] = useState([])
   const [panel, setPanel] = useState(null) // 'drafts' | 'ask'
   const saved = useRef({ text: prefill, poll: JSON.stringify(poll) })
   const live = useRef({})
   live.current = { text, poll, busy, files }
+
+  // ბმულის ბარათი: ტექსტის პირველი ბმული → /api/unfurl (ფოტოს, გამოკითხვის ან ციტატის გარეშე)
+  const [link, setLink] = useState(edit?.link || null)
+  const linkFor = useRef(edit?.link ? firstUrl(edit.body || '') : null)
+  const [linkOff, setLinkOff] = useState(null)
+  const linkAllowed = !isReel && !quote && !poll && !files.length && !(edit && (edit.media?.length || edit.quote_id || edit.poll))
+  useEffect(() => {
+    if (!linkAllowed) return
+    const url = firstUrl(text)
+    if (url === linkFor.current) return
+    if (!url || url === linkOff) { linkFor.current = url; setLink(null); return }
+    const t = setTimeout(() => {
+      linkFor.current = url
+      api.unfurl(url).then((r) => { if (linkFor.current === url) setLink(r?.title ? r : null) })
+    }, 700)
+    return () => clearTimeout(t)
+  }, [text, linkAllowed, linkOff])
+
+  // @მოხსენიების შემოთავაზებები
+  const [mention, setMention] = useState(null) // { q, start, list, i }
+  const mentionReq = useRef(0)
+  const onType = (e) => {
+    setText(e.target.value)
+    const caret = e.target.selectionStart ?? e.target.value.length
+    const m = MENTION_AT.exec(e.target.value.slice(0, caret))
+    if (!m || m[2].length < 2) { setMention(null); return }
+    const q = m[2]
+    const id = ++mentionReq.current
+    setMention((cur) => ({ q, start: caret - q.length - 1, list: cur?.list || [], i: 0 }))
+    setTimeout(() => {
+      if (id !== mentionReq.current) return
+      api.search(q).then((people) => {
+        if (id !== mentionReq.current) return
+        const list = people.filter((p) => p.id !== me?.id && p.username).slice(0, 5)
+        setMention((cur) => (cur && cur.q === q ? { ...cur, list, i: 0 } : cur))
+      }).catch(() => {})
+    }, 220)
+  }
+  const pickMention = (u) => {
+    const end = mention.start + mention.q.length + 1
+    const next = `${text.slice(0, mention.start)}@${u.username} ${text.slice(end)}`
+    setText(next)
+    setMention(null)
+    mentionReq.current++
+    caretTo.current = mention.start + u.username.length + 2
+  }
+  // კურსორი ჩასმული სახელის შემდეგ — მაშინვე, React-ის განახლებისთანავე (შემდეგ ასოებამდე)
+  const caretTo = useRef(null)
+  useLayoutEffect(() => {
+    if (caretTo.current === null || !ta.current) return
+    ta.current.focus()
+    ta.current.setSelectionRange(caretTo.current, caretTo.current)
+    caretTo.current = null
+  })
+  const onKey = (e) => {
+    if (mention?.list.length) {
+      const n = mention.list.length
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setMention((m) => ({ ...m, i: (m.i + (e.key === 'ArrowDown' ? 1 : n - 1)) % n })); return }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pickMention(mention.list[mention.i]); return }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setMention(null); return }
+    }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit()
+  }
 
   useEffect(() => { ta.current?.focus() }, [])
   useEffect(() => { if (draftable) api.drafts().then(setDrafts).catch(() => {}) }, [draftable])
@@ -135,11 +202,26 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
     else setFiles((cur) => [...cur, ...list.map((file) => ({ file, url: URL.createObjectURL(file) }))].slice(0, 6))
   }
 
-  const canPost = !busy && text.length <= MAX && (poll ? text.trim() && pollReady(poll) : isReel ? files.length > 0 : text.trim() || files.length)
+  const editChanged = Boolean(edit) && (text.trim() !== (edit.body || '').trim() || (linkAllowed && (link?.url || null) !== (edit.link?.url || null)))
+  const canPost = edit
+    ? !busy && text.length <= MAX && Boolean(text.trim() || edit.media?.length) && editChanged
+    : !busy && text.length <= MAX && (poll ? text.trim() && pollReady(poll) : isReel ? files.length > 0 : text.trim() || files.length)
 
   const submit = async () => {
     if (!canPost) return
     setBusy(true)
+    if (edit) {
+      try {
+        const post = await api.editPost(edit.id, text.trim(), linkAllowed ? link : edit.link ?? null)
+        onSaved?.(post)
+        toast('შესწორდა')
+        onClose()
+      } catch (e) {
+        toast(e.message, 'error')
+        setBusy(false)
+      }
+      return
+    }
     try {
       const media = []
       for (const { file } of files) {
@@ -151,7 +233,7 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
         media.push({ url, type: file.type.startsWith('video') ? 'video' : 'image', ...dims, ...(thumb ? { thumb } : {}) })
       }
       const pollData = poll ? { options: poll.options.map((o) => o.trim()).filter(Boolean), days: poll.days, multi: poll.multi } : null
-      const post = await api.createPost({ body: text.trim(), media, kind, parent_id: parent?.id || null, quote_id: quote?.id || null, group_id: group?.id || null, poll: pollData })
+      const post = await api.createPost({ body: text.trim(), media, kind, parent_id: parent?.id || null, quote_id: quote?.id || null, group_id: group?.id || null, poll: pollData, link: linkAllowed ? link : null })
       if (draftId) api.deleteDraft(draftId).catch(() => {})
       window.dispatchEvent(new CustomEvent('ezo:posted', { detail: post }))
       toast(parent ? 'პასუხი გამოქვეყნდა' : 'გამოქვეყნდა')
@@ -162,11 +244,12 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
     }
   }
 
-  const title = parent ? 'პასუხი' : quote ? 'ციტირება' : isReel ? 'ახალი ვიდეო' : poll ? 'გამოკითხვა' : 'ახალი პოსტი'
+  const title = edit ? 'რედაქტირება' : parent ? 'პასუხი' : quote ? 'ციტირება' : isReel ? 'ახალი ვიდეო' : poll ? 'გამოკითხვა' : 'ახალი პოსტი'
+  const minutesLeft = edit ? Math.max(0, Math.ceil((Date.parse(edit.created_at) + 15 * 60000 - Date.now()) / 60000)) : 0
   return (
     <>
     <Sheet title={title} onClose={requestClose} actions={
-      <button className="btn btn-primary sm" disabled={!canPost} onClick={submit}>{busy ? 'იტვირთება…' : 'გამოქვეყნება'}</button>
+      <button className="btn btn-primary sm" disabled={!canPost} onClick={submit}>{busy ? 'იტვირთება…' : edit ? 'შენახვა' : 'გამოქვეყნება'}</button>
     }>
       <div className="sheet-body">
         {draftable && drafts.length > 0 && (
@@ -178,6 +261,7 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
           <div className="reply-hint">პასუხი <b>@{parent.author?.username}</b>-ს</div>
         )}
         {group && <div className="reply-hint"><Icon name="users" size={14} /> ჯგუფში: <b>{group.name}</b></div>}
+        {edit && <div className="reply-hint">შესწორება შეგიძლია კიდევ {minutesLeft} წუთი. პოსტზე გამოჩნდება „შესწორებული“.</div>}
         <div className="composer">
           <Avatar user={me} size={40} />
           <div style={{ minWidth: 0 }}>
@@ -185,10 +269,27 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
             <textarea
               ref={ta}
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              onChange={onType}
+              onBlur={() => setTimeout(() => setMention(null), 150)}
               placeholder={poll ? 'დასვი კითხვა…' : parent ? 'დაწერე პასუხი…' : isReel ? 'აღწერა ვიდეოსთვის…' : 'რა ხდება ეზოში?'}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit() }}
+              onKeyDown={onKey}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={Boolean(mention?.list.length)}
+              aria-controls="mention-list"
+              aria-activedescendant={mention?.list.length ? `mention-${mention.list[mention.i].id}` : undefined}
             />
+            {mention?.list.length > 0 && (
+              <ul className="mention-list" id="mention-list" role="listbox" aria-label="ვის მოიხსენიებ">
+                {mention.list.map((u, i) => (
+                  <li key={u.id} id={`mention-${u.id}`} role="option" aria-selected={i === mention.i} className={i === mention.i ? 'on' : ''}
+                    onPointerDown={(e) => { e.preventDefault(); pickMention(u) }}>
+                    <Avatar user={u} size={30} />
+                    <span className="grow"><b>{u.full_name || u.username}</b><small>@{u.username}</small></span>
+                  </li>
+                ))}
+              </ul>
+            )}
             {files.length > 0 && (
               <div className="thumbs">
                 {files.map((f, i) => (
@@ -200,8 +301,9 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
               </div>
             )}
             {quote && <QuoteCard post={quote} />}
+            {linkAllowed && link && <LinkCard link={link} onRemove={() => { setLinkOff(linkFor.current); setLink(null) }} />}
             {poll && <PollEditor value={poll} onChange={setPoll} />}
-            <div className="composer-tools">
+            {!edit && <div className="composer-tools">
               <button className="icon-btn sm" onClick={() => pick.current?.click()} aria-label={isReel ? 'ვიდეოს არჩევა' : 'ფოტო ან ვიდეო'}>
                 <Icon name={isReel ? 'reels' : 'image'} size={21} />
               </button>
@@ -213,7 +315,7 @@ function ComposerSheet({ kind = 'post', parent, quote, group, prefill = '', with
               )}
               {isReel && !files.length && <span className="small faint">აირჩიე ვერტიკალური ვიდეო</span>}
               <span className={`counter${text.length > MAX ? ' over' : ''}`}>{text.length > MAX - 200 ? MAX - text.length : ''}</span>
-            </div>
+            </div>}
           </div>
         </div>
       </div>

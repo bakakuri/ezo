@@ -14,6 +14,7 @@ const KIND = {
   like: { icon: 'heart', color: 'var(--accent)', text: 'მოიწონა შენი პოსტი' },
   reply: { icon: 'reply', color: '#3a5a8c', text: 'გიპასუხა' },
   quote: { icon: 'repost', color: '#5b3a70', text: 'გაგიზიარა ციტატით' },
+  mention: { icon: 'at', color: '#2f6f8f', text: 'მოგიხსენია პოსტში' },
   follow: { icon: 'user', color: 'var(--teal)', text: 'გამოგიწერა' },
   gift: { icon: 'gift', color: '#c77d12', text: 'საჩუქარი გამოგიგზავნა' },
   match: { icon: 'flame', color: 'var(--accent)', text: 'თქვენ ერთმანეთი მოიწონეთ' },

@@ -1,49 +1,5 @@
 -- ეზო — სქემის ნაწილი 3/8. გაუშვი 2-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create policy "conversations members" on public.conversations for select to authenticated using (public.is_member(id));
-create policy "members read" on public.conversation_members for select to authenticated using (public.is_member(conversation_id));
-create policy "messages read" on public.messages for select to authenticated using (public.is_member(conversation_id));
-create policy "messages send" on public.messages for insert to authenticated
-  with check (sender_id = auth.uid() and public.is_member(conversation_id) and public.can_act());
-
-create policy "dating own" on public.dating_profiles for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid() and public.can_act());
-create policy "swipes own insert" on public.swipes for insert to authenticated with check (swiper_id = auth.uid());
-create policy "swipes own read" on public.swipes for select to authenticated using (swiper_id = auth.uid());
-create policy "matches own" on public.matches for select to authenticated using (auth.uid() in (user_a, user_b));
-
-create policy "games read" on public.games for select to authenticated using (true);
-create policy "stats read" on public.game_stats for select to authenticated using (true);
-
--- ---------------------------------------------------------------------
--- მედიის საცავი (ფოტო, ვიდეო, ხმოვანი) — თითო მომხმარებელს თავისი საქაღალდე
--- ---------------------------------------------------------------------
-insert into storage.buckets (id, name, public, file_size_limit)
-values ('media', 'media', true, 52428800)
-on conflict (id) do update set public = true, file_size_limit = 52428800;
-
-drop policy if exists "media read" on storage.objects;
-drop policy if exists "media upload own" on storage.objects;
-drop policy if exists "media delete own" on storage.objects;
-create policy "media read" on storage.objects for select using (bucket_id = 'media');
-create policy "media upload own" on storage.objects for insert to authenticated
-  with check (bucket_id = 'media' and (storage.foldername(name))[1] = auth.uid()::text);
-create policy "media delete own" on storage.objects for delete to authenticated
-  using (bucket_id = 'media' and owner = auth.uid());
-
--- ---------------------------------------------------------------------
--- Realtime
--- ---------------------------------------------------------------------
-do $$ begin
-  begin alter publication supabase_realtime add table public.messages; exception when duplicate_object then null; end;
-  begin alter publication supabase_realtime add table public.games; exception when duplicate_object then null; end;
-  begin alter publication supabase_realtime add table public.notifications; exception when duplicate_object then null; end;
-  begin alter publication supabase_realtime add table public.conversations; exception when duplicate_object then null; end;
-end $$;
-
--- =====================================================================
---  v2: მოდერაცია, Push შეტყობინებები, თამაშების სერვერი, უსაფრთხოება
--- =====================================================================
-
 -- ---------------------------------------------------------------------
 -- მოდერაცია. ადმინის დანიშვნა (ერთხელ, SQL Editor-ში):
 --   update public.profiles set role = 'admin' where username = 'შენი_username';
@@ -425,41 +381,118 @@ drop trigger if exists event_rsvps_change on public.event_rsvps;
 create trigger event_rsvps_change after insert or update or delete on public.event_rsvps
   for each row execute function public.on_rsvp_change();
 
--- Push: ახალი ტიპების ტექსტები
-create or replace function public.on_notification_push()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_actor text; v_group text; v_event text;
+-- Push-ის ტექსტები (on_notification_push) ფაილის ბოლოსაა — ეტაპი E
+
+-- ---------------------------------------------------------------------
+-- v3 RLS
+-- ---------------------------------------------------------------------
+alter table public.groups enable row level security;
+alter table public.group_members enable row level security;
+alter table public.events enable row level security;
+alter table public.event_rsvps enable row level security;
+
+drop policy if exists "groups read" on public.groups;
+drop policy if exists "groups create" on public.groups;
+drop policy if exists "groups update admins" on public.groups;
+drop policy if exists "groups delete owner" on public.groups;
+create policy "groups read" on public.groups for select to authenticated using (true);
+create policy "groups create" on public.groups for insert to authenticated with check (owner_id = auth.uid() and public.can_act());
+create policy "groups update admins" on public.groups for update to authenticated using (public.is_group_admin(id)) with check (public.is_group_admin(id));
+create policy "groups delete owner" on public.groups for delete to authenticated using (owner_id = auth.uid());
+
+drop policy if exists "members read" on public.group_members;
+create policy "members read" on public.group_members for select to authenticated using (
+  user_id = auth.uid() or public.is_group_admin(group_id) or (status = 'active' and public.can_see_group(group_id)));
+
+drop policy if exists "events read" on public.events;
+drop policy if exists "events create" on public.events;
+drop policy if exists "events update host" on public.events;
+drop policy if exists "events delete host" on public.events;
+create policy "events read" on public.events for select to authenticated using (public.can_see_group(group_id));
+create policy "events create" on public.events for insert to authenticated
+  with check (host_id = auth.uid() and public.can_act() and (group_id is null or public.is_group_member(group_id)));
+create policy "events update host" on public.events for update to authenticated using (host_id = auth.uid()) with check (host_id = auth.uid());
+create policy "events delete host" on public.events for delete to authenticated using (host_id = auth.uid() or public.is_group_admin(group_id));
+
+drop policy if exists "rsvps read" on public.event_rsvps;
+drop policy if exists "rsvps own" on public.event_rsvps;
+create policy "rsvps read" on public.event_rsvps for select to authenticated using (true);
+create policy "rsvps own" on public.event_rsvps for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- პოსტები: ჯგუფის ხილვადობა და ჯგუფში წერის უფლება
+drop policy if exists "posts read" on public.posts;
+drop policy if exists "posts insert own" on public.posts;
+drop policy if exists "posts delete own" on public.posts;
+create policy "posts read" on public.posts for select to authenticated
+  using (not public.is_blocked(auth.uid(), author_id)
+         and (not hidden or author_id = auth.uid() or public.is_staff())
+         and public.can_see_group(group_id)
+         and (group_id is not null or parent_id is not null or public.can_see_author(author_id)));
+create policy "posts insert own" on public.posts for insert to authenticated
+  with check (author_id = auth.uid() and public.can_act() and (group_id is null or public.is_group_member(group_id)));
+create policy "posts delete own" on public.posts for delete to authenticated
+  using (author_id = auth.uid() or (group_id is not null and public.is_group_admin(group_id)));
+
+revoke execute on function public.on_rsvp_change() from public, anon, authenticated;
+
+-- =====================================================================
+--  v4: ჯგუფური ჩატები, რეაქციები, პასუხები, ზარები
+-- =====================================================================
+create or replace function public.chat_role(p_conv uuid)
+returns text language sql stable security definer set search_path = public as $$
+  select role from public.conversation_members where conversation_id = p_conv and user_id = auth.uid();
+$$;
+
+-- პასუხი მხოლოდ იმავე ჩატის მესიჯზე
+create or replace function public.before_message_insert()
+returns trigger language plpgsql security invoker set search_path = public as $$
+declare v_lid uuid;
 begin
-  select coalesce(nullif(full_name, ''), username) into v_actor from profiles where id = new.actor_id;
-  select name into v_group from groups where id = new.group_id;
-  select title into v_event from events where id = new.event_id;
-  perform public.push_dispatch(new.user_id, jsonb_build_object(
-    'title', case when new.type like 'tournament%' or new.type = 'listing_price' then coalesce(new.data ->> 'title', 'ეზო') else coalesce(v_actor, 'ეზო') end,
-    'body', case new.type
-      when 'tournament_start' then 'ტურნირი დაიწყო — შემოდი და ითამაშე'
-      when 'tournament_end' then case when (new.data ->> 'place')::int = 1 then '🏆 გაიმარჯვე ტურნირში!'
-        else 'ტურნირი დასრულდა. შენი ადგილი: მე-' || (new.data ->> 'place') || ' (' || (new.data ->> 'players') || '-დან)' end
-      when 'like' then 'მოიწონა შენი პოსტი' when 'reply' then 'გიპასუხა' when 'quote' then 'გაგიზიარა ციტატით'
-      when 'follow' then 'გამოგიწერა' when 'gift' then 'საჩუქარი გამოგიგზავნა'
-      when 'follow_request' then 'გამოწერას გთხოვს' when 'follow_accept' then 'დაგიდასტურა გამოწერა'
-      when 'achievement' then 'ახალი მიღწევა: ' || coalesce((select title from badges where key = new.data ->> 'badge'), '') || ' (+' || (new.data ->> 'coins') || ' ბროწეული)'
-      when 'invite_joined' then 'შენი მოწვევით შემოგვიერთდა 🎉 +20 ბროწეული'
-      when 'level_up' then 'ახალი დონე: ' || (new.data ->> 'level') || '! +' || (new.data ->> 'coins') || ' ბროწეული'
-      when 'listing_price' then 'შენახულ განცხადებას ფასი დაუკლეს: ' || public.price_text((new.data ->> 'price')::numeric, new.data ->> 'currency')
-      when 'match' then 'თქვენ ერთმანეთი მოიწონეთ!' when 'game_invite' then 'თამაშში გეპატიჟება'
-      when 'group_request' then 'ითხოვს გაწევრიანებას: ' || coalesce(v_group, 'ჯგუფი')
-      when 'group_approved' then 'მიგიღეს ჯგუფში: ' || coalesce(v_group, '')
-      when 'event_rsvp' then 'მოდის: ' || coalesce(v_event, 'შენს ივენთზე')
-      else 'ახალი შეტყობინება' end,
-    'url', case when new.type = 'game_invite' and new.game_id is not null then '/g/' || new.game_id
-                when new.tournament_id is not null then '/t/' || new.tournament_id
-                when new.type = 'match' then '/dating?tab=matches'
-                when new.type = 'follow_request' then '/requests'
-                when new.type = 'listing_price' then '/market/' || (new.data ->> 'listing_id')
-                when new.type in ('achievement', 'level_up') then '/rewards'
-                when new.group_id is not null then '/groups/' || (select slug from groups where id = new.group_id)
-                when new.event_id is not null then '/events/' || new.event_id
-                when new.post_id is not null then '/p/' || new.post_id else '/notifications' end,
-    'tag', 'n-' || new.type || '-' || coalesce(new.post_id::text, new.group_id::text, new.tournament_id::text, new.data ->> 'listing_id', new.actor_id::text, '')));
+  if new.reply_to is not null and not exists (select 1 from messages where id = new.reply_to and conversation_id = new.conversation_id) then
+    new.reply_to := null;
+  end if;
+  if current_user in ('authenticated', 'anon') then
+    new.deleted_at := null;
+    new.meta := new.meta - 'call' - 'system';
+  end if;
+  -- განცხადების ბარათი: მონაცემები ყოველთვის ბაზიდან (გაყალბება შეუძლებელია)
+  if new.meta ? 'listing' then
+    begin v_lid := (new.meta -> 'listing' ->> 'id')::uuid; exception when others then v_lid := null; end;
+    new.meta := (new.meta - 'listing') || coalesce((
+      select jsonb_build_object('listing', jsonb_build_object('id', l.id, 'title', l.title, 'price', l.price,
+               'currency', l.currency, 'photo', l.photos ->> 0, 'seller_id', l.seller_id))
+        from listings l where l.id = v_lid), '{}'::jsonb);
+  end if;
   return new;
 end $$;
+drop trigger if exists messages_before_insert on public.messages;
+create trigger messages_before_insert before insert on public.messages
+  for each row execute function public.before_message_insert();
+
+create or replace function public.delete_message(p_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  update messages set body = '', media_url = null, media_type = null, meta = '{}'::jsonb, deleted_at = now()
+   where id = p_id and sender_id = auth.uid() and deleted_at is null;
+  if not found then raise exception 'მესიჯის წაშლა ვერ მოხერხდა'; end if;
+end $$;
+
+create table if not exists public.message_reactions (
+  message_id uuid references public.messages on delete cascade,
+  user_id uuid references public.profiles on delete cascade,
+  conversation_id uuid references public.conversations on delete cascade,
+  emoji text not null check (char_length(emoji) between 1 and 8),
+  created_at timestamptz not null default now(),
+  primary key (message_id, user_id)
+);
+create index if not exists reactions_conv_idx on public.message_reactions (conversation_id);
+
+create or replace function public.before_reaction()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  select conversation_id into new.conversation_id from messages where id = new.message_id;
+  return new;
+end $$;
+drop trigger if exists reactions_before on public.message_reactions;
+create trigger reactions_before before insert or update on public.message_reactions
+  for each row execute function public.before_reaction();

@@ -513,3 +513,44 @@ end $$;
 drop trigger if exists dating_age on public.dating_profiles;
 create trigger dating_age before insert or update on public.dating_profiles
   for each row execute function public.check_dating_age();
+
+create table if not exists public.swipes (
+  swiper_id uuid references public.profiles on delete cascade,
+  target_id uuid references public.profiles on delete cascade,
+  liked boolean not null,
+  created_at timestamptz not null default now(),
+  primary key (swiper_id, target_id),
+  check (swiper_id <> target_id)
+);
+
+create table if not exists public.matches (
+  id uuid primary key default gen_random_uuid(),
+  user_a uuid not null references public.profiles on delete cascade,
+  user_b uuid not null references public.profiles on delete cascade,
+  conversation_id uuid references public.conversations on delete set null,
+  created_at timestamptz not null default now(),
+  unique (user_a, user_b),
+  check (user_a < user_b)
+);
+
+create or replace function public.on_swipe()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_conv uuid; v_a uuid; v_b uuid;
+begin
+  if not new.liked then return new; end if;
+  if exists (select 1 from swipes where swiper_id = new.target_id and target_id = new.swiper_id and liked) then
+    v_a := least(new.swiper_id, new.target_id);
+    v_b := greatest(new.swiper_id, new.target_id);
+    if not exists (select 1 from matches where user_a = v_a and user_b = v_b) then
+      insert into conversations (kind) values ('dating') returning id into v_conv;
+      insert into conversation_members (conversation_id, user_id) values (v_conv, v_a), (v_conv, v_b);
+      insert into matches (user_a, user_b, conversation_id) values (v_a, v_b, v_conv);
+      perform public.notify(new.target_id, new.swiper_id, 'match');
+      perform public.notify(new.swiper_id, new.target_id, 'match');
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists swipes_after on public.swipes;
+create trigger swipes_after after insert on public.swipes
+  for each row execute function public.on_swipe();

@@ -1,231 +1,5 @@
 -- ეზო — სქემის ნაწილი 8/8. გაუშვი 7-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ერთნაირი შეცდომები ერთად: რამდენჯერ, რამდენ ადამიანთან, ბოლო მისამართი და დეტალები
-create or replace function public.admin_errors(p_days int default 7)
-returns table (message text, source text, events bigint, users bigint, first_at timestamptz, last_at timestamptz,
-               path text, stack text, release text, user_agent text)
-language plpgsql stable security definer set search_path = public as $$
-begin
-  if not public.is_staff() then raise exception 'forbidden'; end if;
-  return query
-  select e.message,
-    (array_agg(e.source order by e.created_at desc))[1],
-    count(*), count(distinct e.user_id), min(e.created_at), max(e.created_at),
-    (array_agg(e.path order by e.created_at desc))[1],
-    (array_agg(e.stack order by e.created_at desc) filter (where e.stack is not null))[1],
-    (array_agg(e.release order by e.created_at desc))[1],
-    (array_agg(e.user_agent order by e.created_at desc))[1]
-  from client_errors e
-  where e.created_at > now() - make_interval(days => greatest(1, least(coalesce(p_days, 7), 30)))
-  group by e.message
-  order by max(e.created_at) desc
-  limit 100;
-end $$;
-
--- „მოგვარებულია“: ამ შეცდომის ყველა ჩანაწერი იშლება
-create or replace function public.admin_clear_errors(p_message text)
-returns int language plpgsql security definer set search_path = public as $$
-declare n int;
-begin
-  if not public.is_staff() then raise exception 'forbidden'; end if;
-  delete from client_errors where message = p_message;
-  get diagnostics n = row_count;
-  return n;
-end $$;
-
--- ---------------------------------------------------------------------
--- საძიებო სისტემები: sitemap.xml-ის სია (api/sitemap.js). მხოლოდ საჯარო:
--- ღია პროფილები, აქტიური განცხადებები და მომავალი ღია შეხვედრები.
--- ---------------------------------------------------------------------
-create or replace function public.sitemap_entries()
-returns jsonb language sql stable security definer set search_path = public as $$
-  select jsonb_build_object(
-    'u', coalesce((select jsonb_agg(a.username) from (
-           select p.username from profiles p
-            where p.onboarded and not p.is_private and p.username is not null
-              and (p.banned_until is null or p.banned_until < now())
-            order by p.followers_count desc, p.created_at desc limit 5000) a), '[]'),
-    'm', coalesce((select jsonb_agg(jsonb_build_array(b.id, b.changed)) from (
-           select l.id, greatest(l.updated_at, coalesce(l.bumped_at, l.updated_at)) changed
-             from listings l join profiles s on s.id = l.seller_id
-            where l.status = 'active' and not l.hidden and (s.banned_until is null or s.banned_until < now())
-            order by coalesce(l.bumped_at, l.created_at) desc limit 3000) b), '[]'),
-    'e', coalesce((select jsonb_agg(jsonb_build_array(c.id, c.created_at)) from (
-           select e.id, e.created_at from events e left join groups g on g.id = e.group_id
-            where coalesce(e.ends_at, e.starts_at) > now() and (e.group_id is null or g.privacy = 'public')
-            order by e.starts_at limit 1000) c), '[]'));
-$$;
-grant execute on function public.sitemap_entries() to anon, authenticated;
-
--- =====================================================================
--- ეტაპი C: ვის გამოიწერო, მიმაგრებული პოსტი, მონახაზები, დადასტურებული ნიშანი, ქართული ძებნა
--- =====================================================================
-alter table public.profiles add column if not exists verified boolean not null default false;
-alter table public.profiles add column if not exists pinned_post_id uuid references public.posts on delete set null;
-
--- მომხმარებელი პირდაპირ ვერ შეცვლის: მთვლელებს, როლს, შეზღუდვას, მომწვევს, ნიშანს და მიმაგრებულ პოსტს
--- (ამათ მხოლოდ შესაბამისი ფუნქციები ცვლიან)
-create or replace function public.protect_profile_counters()
-returns trigger language plpgsql as $$
-begin
-  if current_user in ('authenticated', 'anon') then
-    new.followers_count := old.followers_count;
-    new.following_count := old.following_count;
-    new.posts_count := old.posts_count;
-    new.role := old.role;
-    new.banned_until := old.banned_until;
-    new.ban_reason := old.ban_reason;
-    new.invited_by := old.invited_by;
-    new.verified := old.verified;
-    new.pinned_post_id := old.pinned_post_id;
-  end if;
-  return new;
-end $$;
-drop trigger if exists profiles_protect on public.profiles;
-create trigger profiles_protect before update on public.profiles
-  for each row execute function public.protect_profile_counters();
-
--- ---- დადასტურებული ნიშანი: მხოლოდ ადმინი ანიჭებს
-create or replace function public.admin_set_verified(p_user uuid, p_on boolean)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if not exists (select 1 from profiles where id = auth.uid() and role = 'admin') then raise exception 'forbidden'; end if;
-  update profiles set verified = coalesce(p_on, false) where id = p_user;
-end $$;
-
--- ---- მიმაგრებული პოსტი: საკუთარი, მთავარი (არა პასუხი), ჯგუფის გარეთ. p_post = null — მოხსნა
-create or replace function public.pin_post(p_post uuid)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if auth.uid() is null then raise exception 'not signed in'; end if;
-  if p_post is not null and not exists (
-    select 1 from posts where id = p_post and author_id = auth.uid() and parent_id is null and group_id is null and not hidden
-  ) then raise exception 'ამ პოსტს პროფილზე ვერ მიამაგრებ'; end if;
-  update profiles set pinned_post_id = p_post where id = auth.uid();
-end $$;
-
--- ---- მონახაზები: ტექსტი და გამოკითხვა, ყველა მოწყობილობაზე. მაქსიმუმ 50
-create table if not exists public.drafts (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null default auth.uid() references public.profiles on delete cascade,
-  body text not null default '' check (char_length(body) <= 2000),
-  poll jsonb,
-  group_id uuid references public.groups on delete set null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-create index if not exists drafts_user_idx on public.drafts (user_id, updated_at desc);
-alter table public.drafts enable row level security;
-drop policy if exists "own drafts" on public.drafts;
-create policy "own drafts" on public.drafts for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-grant select, insert, update, delete on public.drafts to authenticated;
-
-create or replace function public.drafts_guard()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if tg_op = 'INSERT' and (select count(*) from drafts where user_id = new.user_id) >= 50 then
-    raise exception 'მონახაზი მაქსიმუმ 50 შეიძლება — ძველები წაშალე';
-  end if;
-  if tg_op = 'UPDATE' then new.user_id := old.user_id; new.created_at := old.created_at; end if;
-  new.updated_at := now();
-  return new;
-end $$;
-drop trigger if exists drafts_guard on public.drafts;
-create trigger drafts_guard before insert or update on public.drafts
-  for each row execute function public.drafts_guard();
-
--- ---- ვის გამოიწერო: მიზეზით (გამოგიწერა, კლასელი, საერთო მეგობრები, სკოლა, ქალაქი…). „არ მაინტერესებს“ ინახება
-create table if not exists public.suggestion_dismissals (
-  user_id uuid not null default auth.uid() references public.profiles on delete cascade,
-  dismissed_id uuid not null references public.profiles on delete cascade,
-  created_at timestamptz not null default now(),
-  primary key (user_id, dismissed_id)
-);
-alter table public.suggestion_dismissals enable row level security;
-drop policy if exists "own dismissals" on public.suggestion_dismissals;
-create policy "own dismissals" on public.suggestion_dismissals for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-grant select, insert, delete on public.suggestion_dismissals to authenticated;
-
-create or replace function public.dismiss_suggestion(p_user uuid)
-returns void language sql security definer set search_path = public as $$
-  insert into suggestion_dismissals (user_id, dismissed_id) select auth.uid(), p_user where auth.uid() is not null
-  on conflict do nothing;
-$$;
-
-create or replace function public.who_to_follow(p_limit int default 12)
-returns jsonb language sql stable security definer set search_path = public as $$
-  with me as (select * from profiles where id = auth.uid()),
-  fof as (
-    select f2.following_id as id, count(*) as n, min(f1.following_id::text)::uuid as via
-      from follows f1 join follows f2 on f2.follower_id = f1.following_id
-     where f1.follower_id = auth.uid()
-     group by f2.following_id
-  ),
-  cand as (
-    select p.*, coalesce(fof.n, 0) as mutual, fof.via,
-      exists (select 1 from follows x where x.follower_id = p.id and x.following_id = me.id) as follows_me,
-      (coalesce(me.school, '') <> '' and lower(p.school) = lower(me.school)) as same_school,
-      (coalesce(me.school, '') <> '' and lower(p.school) = lower(me.school) and p.grad_year = me.grad_year) as classmate,
-      (coalesce(me.city, '') <> '' and lower(p.city) = lower(me.city)) as same_city,
-      (p.id = me.invited_by or p.invited_by = me.id) as invite
-    from profiles p cross join me left join fof on fof.id = p.id
-    where p.id <> me.id and p.onboarded and (p.banned_until is null or p.banned_until < now())
-      and not exists (select 1 from follows f where f.follower_id = me.id and f.following_id = p.id)
-      and not exists (select 1 from follow_requests r where r.requester_id = me.id and r.target_id = p.id)
-      and not exists (select 1 from suggestion_dismissals d where d.user_id = me.id and d.dismissed_id = p.id)
-      and not public.is_blocked(me.id, p.id)
-  ),
-  ranked as (
-    select c.*,
-      (case when c.follows_me then 100 else 0 end) + (case when c.invite then 60 else 0 end)
-      + (case when c.classmate then 40 when c.same_school then 25 else 0 end)
-      + least(c.mutual, 10) * 8 + (case when c.same_city then 8 else 0 end)
-      + ln(1 + c.followers_count) + (case when c.created_at > now() - interval '14 days' then 3 else 0 end) as score
-    from cand c
-    order by score desc, c.followers_count desc
-    limit greatest(1, least(coalesce(p_limit, 12), 50))
-  )
-  select coalesce(jsonb_agg(jsonb_build_object(
-      'id', r.id, 'username', r.username, 'full_name', r.full_name, 'avatar_url', r.avatar_url, 'last_seen', r.last_seen,
-      'verified', r.verified, 'city', r.city, 'school', r.school, 'grad_year', r.grad_year, 'followers_count', r.followers_count,
-      'reason', case when r.follows_me then 'follows_you' when r.invite then 'invite' when r.classmate then 'classmate'
-                     when r.mutual > 0 then 'mutual' when r.same_school then 'school' when r.same_city then 'city'
-                     when r.created_at > now() - interval '14 days' then 'new' else 'popular' end,
-      'mutual', r.mutual,
-      'via', (select coalesce(nullif(v.full_name, ''), v.username) from profiles v where v.id = r.via))
-    order by r.score desc, r.followers_count desc), '[]'::jsonb)
-  from ranked r;
-$$;
-
--- ---- ქართული ძებნა: „გიორგი“ = „giorgi“, „beridze“ = „ბერიძე“, „ჭავჭავაძე“ = „chavchavadze“, უმნიშვნელო შეცდომებიც
--- ორივე დამწერლობა ერთ ფორმაზე მიდის; მსგავსი ბგერები ერთდება (თ/ტ, კ/ქ/ყ, პ/ფ, ჩ/ჭ, ც/წ).
--- იგივე წესი აპშია: src/lib/translit.js (ტესტები ამოწმებს, რომ ერთნაირად მუშაობს)
-create schema if not exists extensions;
-create extension if not exists pg_trgm with schema extensions;
-grant usage on schema extensions to anon, authenticated, service_role;
-
-create or replace function public.ka_skeleton(p text)
-returns text language sql immutable parallel safe as $$
-  select translate(
-    replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(
-      lower(coalesce(p, '')),
-      'ch''', 'č'), 'chh', 'č'), 'ch', 'č'), 'sh', 'š'), 'zh', 'ž'), 'kh', 'x'), 'gh', 'ğ'), 'dz', 'đ'),
-      'ts''', 'c'), 'tz', 'c'), 'ts', 'c'), 'th', 't'), 'ph', 'p'), '''', ''),
-    'აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰqywf',
-    'abgdevztiklmnopžrstupkğkščcđcčxjhkkcp');
-$$;
-
--- ინდექსები (pg_trgm-ის სქემა შეიძლება განსხვავდებოდეს — ვპოულობთ)
-do $$
-declare s text;
-begin
-  select n.nspname into s from pg_extension e join pg_namespace n on n.oid = e.extnamespace where e.extname = 'pg_trgm';
-  execute format('create index if not exists profiles_search_trgm on public.profiles using gin (public.ka_skeleton(coalesce(full_name, '''') || '' '' || coalesce(username, '''')) %I.gin_trgm_ops)', s);
-  execute format('create index if not exists posts_search_trgm on public.posts using gin (public.ka_skeleton(body) %I.gin_trgm_ops) where parent_id is null', s);
-  execute format('create index if not exists groups_search_trgm on public.groups using gin (public.ka_skeleton(name) %I.gin_trgm_ops)', s);
-  execute format('create index if not exists listings_search_trgm on public.listings using gin (public.ka_skeleton(title) %I.gin_trgm_ops)', s);
-end $$;
-
 -- ერთი ძებნა ყველაფერზე. security invoker — RLS მოქმედებს (დახურული პროფილის პოსტები, დამალული და სხვ. არ ჩანს)
 create or replace function public.search_all(p_q text, p_limit int default 20)
 returns jsonb language plpgsql stable security invoker set search_path = public, extensions as $$
@@ -440,3 +214,233 @@ begin
                           select 1 from daily_active a where a.user_id = p.id and a.day > today - 7)) / count(*)) end
                        from profiles p where (p.created_at at time zone 'Asia/Tbilisi')::date between today - 14 and today - 8)));
 end $$;
+
+-- =====================================================================
+-- ეტაპი E: დაბადების და სახელობის დღეები, @მოხსენიება, რედაქტირება, ბმულის ბარათები, მოგონებები
+-- =====================================================================
+
+-- ---- დაბადების დღე: მხოლოდ თვე და დღე (წელი არ ინახება), ცალკე ცხრილში — სხვები პირდაპირ ვერ კითხულობენ,
+-- მხოლოდ celebrations_today აჩვენებს მეგობრებს დღესვე (თუ visible)
+create table if not exists public.birthdays (
+  user_id uuid primary key default auth.uid() references public.profiles on delete cascade,
+  month smallint not null check (month between 1 and 12),
+  day smallint not null check (day between 1 and 31),
+  visible boolean not null default true,
+  check (day <= case month when 2 then 29 when 4 then 30 when 6 then 30 when 9 then 30 when 11 then 30 else 31 end)
+);
+alter table public.birthdays enable row level security;
+drop policy if exists "own birthday" on public.birthdays;
+create policy "own birthday" on public.birthdays for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+grant select, insert, update, delete on public.birthdays to authenticated;
+
+-- ---- სახელობის დღეები (ახალი სტილით). name — სახელის „ჩონჩხი“ (ka_skeleton), რომ ლათინურად დაწერილიც დაემთხვეს.
+-- სია შეგიძლია შეავსო: insert into public.name_days (name, month, day, feast) values (public.ka_skeleton('სახელი'), თვე, დღე, 'დღესასწაული');
+create table if not exists public.name_days (
+  name text not null,
+  month smallint not null check (month between 1 and 12),
+  day smallint not null check (day between 1 and 31),
+  feast text not null,
+  primary key (name, month, day)
+);
+alter table public.name_days enable row level security;
+drop policy if exists "name days read" on public.name_days;
+create policy "name days read" on public.name_days for select to authenticated using (true);
+grant select on public.name_days to authenticated;
+
+insert into public.name_days (name, month, day, feast)
+select public.ka_skeleton(n), m, d, f from (values
+  ('გიორგი', 11, 23, 'გიორგობა'), ('გიო', 11, 23, 'გიორგობა'), ('გოგი', 11, 23, 'გიორგობა'), ('გოგა', 11, 23, 'გიორგობა'),
+  ('გიორგი', 5, 6, 'გაზაფხულის გიორგობა'), ('გიო', 5, 6, 'გაზაფხულის გიორგობა'), ('გოგი', 5, 6, 'გაზაფხულის გიორგობა'), ('გოგა', 5, 6, 'გაზაფხულის გიორგობა'),
+  ('მარიამ', 8, 28, 'მარიამობა'), ('მარიამი', 8, 28, 'მარიამობა'), ('მარი', 8, 28, 'მარიამობა'),
+  ('ნინო', 1, 27, 'ნინოობა'),
+  ('ანდრია', 5, 12, 'ანდრიაობა'),
+  ('ნიკოლოზ', 12, 19, 'ნიკოლოზობა'), ('ნიკოლოზი', 12, 19, 'ნიკოლოზობა'), ('ნიკა', 12, 19, 'ნიკოლოზობა'), ('ნიკო', 12, 19, 'ნიკოლოზობა'),
+  ('ბარბარე', 12, 17, 'ბარბარობა'),
+  ('ეკატერინე', 12, 7, 'ეკატერინობა'), ('ეკა', 12, 7, 'ეკატერინობა'),
+  ('მიხეილ', 11, 21, 'მთავარანგელოზობა'), ('მიხეილი', 11, 21, 'მთავარანგელოზობა'), ('მიშა', 11, 21, 'მთავარანგელოზობა'), ('მიხო', 11, 21, 'მთავარანგელოზობა'),
+  ('გაბრიელ', 11, 21, 'მთავარანგელოზობა'), ('გაბრიელი', 11, 21, 'მთავარანგელოზობა'), ('გაბო', 11, 21, 'მთავარანგელოზობა'),
+  ('იოანე', 7, 7, 'ივანობა'), ('ივანე', 7, 7, 'ივანობა'), ('ვანო', 7, 7, 'ივანობა'),
+  ('პეტრე', 7, 12, 'პეტრე-პავლობა'), ('პავლე', 7, 12, 'პეტრე-პავლობა'),
+  ('ელენე', 6, 3, 'კონსტანტინე და ელენე'), ('კონსტანტინე', 6, 3, 'კონსტანტინე და ელენე'), ('კოტე', 6, 3, 'კონსტანტინე და ელენე'),
+  ('ილია', 8, 2, 'ილიაობა'),
+  ('სოფიო', 9, 30, 'სოფიოობა'), ('სოფო', 9, 30, 'სოფიოობა'), ('სოფია', 9, 30, 'სოფიოობა'),
+  ('თამარ', 5, 14, 'თამარობა'), ('თამარი', 5, 14, 'თამარობა'), ('თამუნა', 5, 14, 'თამარობა'),
+  ('ქეთევან', 9, 26, 'ქეთევანობა'), ('ქეთევანი', 9, 26, 'ქეთევანობა'), ('ქეთი', 9, 26, 'ქეთევანობა'), ('ქეთო', 9, 26, 'ქეთევანობა'),
+  ('ვახტანგ', 12, 13, 'ვახტანგობა'), ('ვახტანგი', 12, 13, 'ვახტანგობა'), ('ვახო', 12, 13, 'ვახტანგობა'),
+  ('ლუკა', 10, 31, 'ლუკაობა'), ('მათე', 11, 29, 'მათეობა'), ('თომა', 10, 19, 'თომაობა'),
+  ('დიმიტრი', 11, 8, 'დიმიტრობა'), ('თეკლა', 10, 7, 'თეკლაობა'),
+  ('ალექსანდრე', 12, 6, 'ალექსანდრობა'), ('სანდრო', 12, 6, 'ალექსანდრობა'), ('ალეკო', 12, 6, 'ალექსანდრობა')
+) as v(n, m, d, f)
+on conflict do nothing;
+
+-- დღეს: დაბადების დღეები და სახელობის დღეები ჩემს წრეში (ვისაც ვიწერ ან ვინც მიწერს), თბილისის დროით
+create or replace function public.celebrations_today()
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare
+  me uuid := auth.uid();
+  today date := (now() at time zone 'Asia/Tbilisi')::date;
+  m int := extract(month from (now() at time zone 'Asia/Tbilisi'))::int;
+  d int := extract(day from (now() at time zone 'Asia/Tbilisi'))::int;
+  -- 29 თებერვალს დაბადებულები ნაკიან წელს 28-ში
+  leap_fix boolean := (m = 2 and d = 28 and extract(day from (date_trunc('month', today) + interval '1 month - 1 day'))::int = 28);
+begin
+  if me is null then return null; end if;
+  return jsonb_build_object(
+    'date', today,
+    'birthdays', coalesce((
+      select jsonb_agg(jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url,
+                                          'verified', p.verified, 'last_seen', p.last_seen) order by p.full_name)
+      from profiles p join birthdays b on b.user_id = p.id
+      where p.id <> me and p.onboarded and b.visible and (p.banned_until is null or p.banned_until < now())
+        and b.month = m and (b.day = d or (leap_fix and b.day = 29))
+        and (exists (select 1 from follows where follower_id = me and following_id = p.id)
+             or exists (select 1 from follows where follower_id = p.id and following_id = me))
+        and not public.is_blocked(me, p.id)), '[]'::jsonb),
+    'namedays', coalesce((
+      select jsonb_agg(jsonb_build_object('feast', x.feast, 'people', x.people) order by x.feast)
+      from (
+        select nd.feast, jsonb_agg(distinct jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name,
+                 'avatar_url', p.avatar_url, 'verified', p.verified, 'last_seen', p.last_seen)) as people
+        from name_days nd
+        join profiles p on public.ka_skeleton(split_part(btrim(p.full_name), ' ', 1)) = nd.name
+        where nd.month = m and nd.day = d and p.id <> me and p.onboarded and (p.banned_until is null or p.banned_until < now())
+          and (exists (select 1 from follows where follower_id = me and following_id = p.id)
+               or exists (select 1 from follows where follower_id = p.id and following_id = me))
+          and not public.is_blocked(me, p.id)
+        group by nd.feast) x), '[]'::jsonb),
+    'feasts', coalesce((select jsonb_agg(distinct feast) from name_days where month = m and day = d), '[]'::jsonb),
+    'mine', jsonb_build_object(
+      'birthday', exists (select 1 from birthdays b where b.user_id = me and b.month = m and (b.day = d or (leap_fix and b.day = 29))),
+      'nameday', (select nd.feast from name_days nd join profiles p on p.id = me
+                  where nd.month = m and nd.day = d and public.ka_skeleton(split_part(btrim(p.full_name), ' ', 1)) = nd.name limit 1)));
+end $$;
+
+-- ---- @მოხსენიება: შეტყობინება იმას, ვინც პოსტს ხედავს (მაქსიმუმ 10 ერთ პოსტში; რედაქტირებისას — მხოლოდ ახლებს)
+alter table public.notifications drop constraint if exists notifications_type_check;
+alter table public.notifications add constraint notifications_type_check check (type in (
+  'like', 'reply', 'follow', 'gift', 'match', 'game_invite', 'quote',
+  'group_request', 'group_approved', 'event_rsvp', 'tournament_start', 'tournament_end',
+  'follow_request', 'follow_accept', 'listing_price', 'achievement', 'level_up', 'invite_joined', 'mention'));
+
+create or replace function public.extract_mentions(t text)
+returns text[] language sql immutable as $$
+  select coalesce(array_agg(distinct rtrim(lower(m[2]), '.')), '{}')
+  from regexp_matches(coalesce(t, ''), '(^|[^A-Za-z0-9_.@])@([A-Za-z0-9_.]{3,24})', 'g') as m;
+$$;
+
+create or replace function public.on_post_mentions()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_new text[]; v_old text[] := '{}'; v_user record; v_private boolean;
+begin
+  v_new := public.extract_mentions(new.body);
+  if tg_op = 'UPDATE' then v_old := public.extract_mentions(old.body); end if;
+  if cardinality(v_new) = 0 or new.hidden then return null; end if;
+  select is_private into v_private from profiles where id = new.author_id;
+  for v_user in
+    select p.id from profiles p
+    where p.username = any (v_new) and not (p.username = any (v_old)) and p.id <> new.author_id and p.onboarded
+      -- ხედავს თუ არა მოხსენიებული ამ პოსტს
+      and (not coalesce(v_private, false) or exists (select 1 from follows f where f.follower_id = p.id and f.following_id = new.author_id))
+      and (new.group_id is null or exists (select 1 from groups g where g.id = new.group_id and g.privacy = 'public')
+           or exists (select 1 from group_members gm where gm.group_id = new.group_id and gm.user_id = p.id and gm.status = 'active'))
+    limit 10
+  loop
+    perform public.notify(v_user.id, new.author_id, 'mention', new.id);
+  end loop;
+  return null;
+end $$;
+drop trigger if exists posts_mentions on public.posts;
+create trigger posts_mentions after insert or update of body on public.posts
+  for each row execute function public.on_post_mentions();
+revoke execute on function public.on_post_mentions() from public, anon, authenticated;
+
+-- მოხსენიების Push „პასუხების“ კატეგორიაშია
+create or replace function public.push_category(p_payload jsonb)
+returns text language sql immutable as $$
+  select case
+    when p_payload ->> 'tag' like 'conv-%' then 'messages'
+    when p_payload ->> 'tag' like 'call-%' then 'calls'
+    when p_payload ->> 'tag' like 'game-%' then 'games'
+    when p_payload ->> 'tag' ~ '^n-(reply|quote|mention)-' then 'replies'
+    when p_payload ->> 'tag' ~ '^n-like-' then 'likes'
+    when p_payload ->> 'tag' ~ '^n-(follow|follow_request|follow_accept|invite_joined)-' then 'follows'
+    when p_payload ->> 'tag' ~ '^n-(game_invite|tournament_start|tournament_end)-' then 'games'
+    when p_payload ->> 'tag' ~ '^n-match-' then 'dating'
+    when p_payload ->> 'tag' ~ '^n-listing_price-' then 'market'
+    when p_payload ->> 'tag' ~ '^n-(group_request|group_approved|event_rsvp)-' then 'groups'
+    when p_payload ->> 'tag' ~ '^n-(gift|achievement|level_up)-' then 'rewards'
+    else 'other' end;
+$$;
+
+-- Push-ის ტექსტები ყველა ტიპისთვის (მოხსენიების ჩათვლით)
+create or replace function public.on_notification_push()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_actor text; v_group text; v_event text;
+begin
+  select coalesce(nullif(full_name, ''), username) into v_actor from profiles where id = new.actor_id;
+  select name into v_group from groups where id = new.group_id;
+  select title into v_event from events where id = new.event_id;
+  perform public.push_dispatch(new.user_id, jsonb_build_object(
+    'title', case when new.type like 'tournament%' or new.type = 'listing_price' then coalesce(new.data ->> 'title', 'ეზო') else coalesce(v_actor, 'ეზო') end,
+    'body', case new.type
+      when 'tournament_start' then 'ტურნირი დაიწყო — შემოდი და ითამაშე'
+      when 'tournament_end' then case when (new.data ->> 'place')::int = 1 then '🏆 გაიმარჯვე ტურნირში!'
+        else 'ტურნირი დასრულდა. შენი ადგილი: მე-' || (new.data ->> 'place') || ' (' || (new.data ->> 'players') || '-დან)' end
+      when 'like' then 'მოიწონა შენი პოსტი' when 'reply' then 'გიპასუხა' when 'quote' then 'გაგიზიარა ციტატით'
+      when 'mention' then 'მოგიხსენია: ' || coalesce(left((select body from posts where id = new.post_id), 100), '')
+      when 'follow' then 'გამოგიწერა' when 'gift' then 'საჩუქარი გამოგიგზავნა'
+      when 'follow_request' then 'გამოწერას გთხოვს' when 'follow_accept' then 'დაგიდასტურა გამოწერა'
+      when 'achievement' then 'ახალი მიღწევა: ' || coalesce((select title from badges where key = new.data ->> 'badge'), '') || ' (+' || (new.data ->> 'coins') || ' ბროწეული)'
+      when 'invite_joined' then 'შენი მოწვევით შემოგვიერთდა 🎉 +20 ბროწეული'
+      when 'level_up' then 'ახალი დონე: ' || (new.data ->> 'level') || '! +' || (new.data ->> 'coins') || ' ბროწეული'
+      when 'listing_price' then 'შენახულ განცხადებას ფასი დაუკლეს: ' || public.price_text((new.data ->> 'price')::numeric, new.data ->> 'currency')
+      when 'match' then 'თქვენ ერთმანეთი მოიწონეთ!' when 'game_invite' then 'თამაშში გეპატიჟება'
+      when 'group_request' then 'ითხოვს გაწევრიანებას: ' || coalesce(v_group, 'ჯგუფი')
+      when 'group_approved' then 'მიგიღეს ჯგუფში: ' || coalesce(v_group, '')
+      when 'event_rsvp' then 'მოდის: ' || coalesce(v_event, 'შენს ივენთზე')
+      else 'ახალი შეტყობინება' end,
+    'url', case when new.type = 'game_invite' and new.game_id is not null then '/g/' || new.game_id
+                when new.tournament_id is not null then '/t/' || new.tournament_id
+                when new.type = 'match' then '/dating?tab=matches'
+                when new.type = 'follow_request' then '/requests'
+                when new.type = 'listing_price' then '/market/' || (new.data ->> 'listing_id')
+                when new.type in ('achievement', 'level_up') then '/rewards'
+                when new.group_id is not null then '/groups/' || (select slug from groups where id = new.group_id)
+                when new.event_id is not null then '/events/' || new.event_id
+                when new.post_id is not null then '/p/' || new.post_id else '/notifications' end,
+    'tag', 'n-' || new.type || '-' || coalesce(new.post_id::text, new.group_id::text, new.tournament_id::text, new.data ->> 'listing_id', new.actor_id::text, '')));
+  return new;
+end $$;
+
+-- ---- ბმულის ბარათი: { url, title, description, image, site } — ავტორი ამატებს გამოქვეყნებისას (api/unfurl.js)
+alter table public.posts add column if not exists link jsonb;
+alter table public.posts drop constraint if exists posts_link_check;
+alter table public.posts add constraint posts_link_check check (
+  link is null or (jsonb_typeof(link) = 'object' and link ->> 'url' ~ '^https?://' and char_length(link::text) <= 2000
+                   and coalesce(link ->> 'image', 'https://') ~ '^https://'));
+
+-- ---- რედაქტირება: ტექსტის შესწორება გამოქვეყნებიდან 15 წუთის განმავლობაში („შესწორებულია“ — edited_at)
+create or replace function public.posts_edit_window()
+returns trigger language plpgsql as $$
+begin
+  if current_user in ('authenticated', 'anon') and (new.body is distinct from old.body or new.link is distinct from old.link)
+     and old.created_at < now() - interval '15 minutes' then
+    raise exception 'პოსტის შესწორება მხოლოდ გამოქვეყნებიდან 15 წუთის განმავლობაშია შესაძლებელი';
+  end if;
+  return new;
+end $$;
+drop trigger if exists posts_edit_window on public.posts;
+create trigger posts_edit_window before update of body, link on public.posts
+  for each row execute function public.posts_edit_window();
+
+-- ---- „ამ დღეს“: ჩემი პოსტები იგივე დღეს წინა წლებში (თბილისის დროით)
+create or replace function public.my_memories()
+returns setof public.posts language sql stable security invoker set search_path = public as $$
+  select p.* from posts p
+  where p.author_id = auth.uid() and p.parent_id is null and not p.hidden
+    and extract(month from (p.created_at at time zone 'Asia/Tbilisi')) = extract(month from (now() at time zone 'Asia/Tbilisi'))
+    and extract(day from (p.created_at at time zone 'Asia/Tbilisi')) = extract(day from (now() at time zone 'Asia/Tbilisi'))
+    and (p.created_at at time zone 'Asia/Tbilisi')::date < date_trunc('year', now() at time zone 'Asia/Tbilisi')::date
+  order by p.created_at desc
+  limit 3;
+$$;

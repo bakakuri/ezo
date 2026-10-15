@@ -12,6 +12,7 @@ import { Icon } from '../components/Icon.jsx'
 import { banText } from '../lib/format.js'
 import { pushStatus, enablePush } from '../lib/push.js'
 import { SuggestStrip } from '../components/Suggest.jsx'
+import { Celebrate } from '../components/Celebrate.jsx'
 
 const readTab = () => { try { return localStorage.getItem('ezo.feed') || 'foryou' } catch { return 'foryou' } }
 
@@ -94,6 +95,7 @@ export default function Home() {
       )}
       <PushPrompt />
       <StoryRail />
+      <Celebrate />
       <div className="seg" role="tablist">
         <button role="tab" aria-selected={tab === 'foryou'} className={tab === 'foryou' ? 'on' : ''} onClick={() => setTab('foryou')}>შენთვის</button>
         <button role="tab" aria-selected={tab === 'following'} className={tab === 'following' ? 'on' : ''} onClick={() => setTab('following')}>გამოწერები</button>

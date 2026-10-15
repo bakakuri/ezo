@@ -9,12 +9,15 @@ import { useToast } from './Toast.jsx'
 import { useComposer } from './Composer.jsx'
 import { ReportSheet } from './Report.jsx'
 import { PollView, SaveSheet } from './PostExtras.jsx'
+import { hostOf, shortUrl } from '../lib/links.js'
 
-// #თეგები და @მოხსენიებები ბმულებად
+// #თეგები, @მოხსენიებები და ბმულები
+const TOKEN_RE = /(https?:\/\/[^\s<>"'«»“”]+[^\s<>"'«»“”.,;:!?)\]]|[#@][\p{L}\p{N}_.]+)/gu
 export function RichText({ text }) {
   if (!text) return null
-  const parts = text.split(/([#@][\p{L}\p{N}_.]+)/gu)
+  const parts = text.split(TOKEN_RE)
   return parts.map((p, i) => {
+    if (/^https?:\/\//.test(p)) return <a key={i} className="tag" href={p} target="_blank" rel="noopener noreferrer nofollow ugc" onClick={(e) => e.stopPropagation()}>{shortUrl(p)}</a>
     if (p.startsWith('@') && p.length > 1) return <Link key={i} className="tag" to={`/u/${p.slice(1).replace(/\.$/, '')}`} onClick={(e) => e.stopPropagation()}>{p}</Link>
     if (p.startsWith('#') && p.length > 1) return <Link key={i} className="tag" to={`/tag/${encodeURIComponent(p.slice(1).toLowerCase())}`} onClick={(e) => e.stopPropagation()}>{p}</Link>
     return p
@@ -35,6 +38,30 @@ export function Media({ media }) {
       ))}
     </div>
   )
+}
+
+// ბმულის ბარათი: დომენი ყოველთვის ნამდვილი ბმულიდან ჩანს (არა ავტორის ტექსტიდან)
+export function LinkCard({ link, onRemove }) {
+  if (!link?.url) return null
+  const body = (
+    <>
+      {link.image && <img src={link.image} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />}
+      <span className="link-text">
+        <small>{hostOf(link.url)}</small>
+        <b>{link.title}</b>
+        {link.description && <span>{link.description}</span>}
+      </span>
+    </>
+  )
+  if (onRemove) {
+    return (
+      <div className="link-card editing">
+        {body}
+        <button type="button" className="link-x" onClick={onRemove} aria-label="ბარათის მოხსნა"><Icon name="close" size={14} /></button>
+      </div>
+    )
+  }
+  return <a className="link-card" href={link.url} target="_blank" rel="noopener noreferrer nofollow ugc" onClick={(e) => e.stopPropagation()}>{body}</a>
 }
 
 export function QuoteCard({ post }) {
@@ -105,10 +132,12 @@ export function PostCard({ post: initial, threaded = false, focus = false, hideG
             </Link>
           )}
           <time className="time" dateTime={post.created_at}>{timeAgo(post.created_at)}</time>
+          {post.edited_at && Date.parse(post.edited_at) - Date.parse(post.created_at) > 5000 && <span className="edited" title={`შესწორდა ${new Date(post.edited_at).toLocaleString('ka-GE', { dateStyle: 'medium', timeStyle: 'short' })}`}>შესწორებული</span>}
           <button className="icon-btn sm more" aria-label="მეტი" onClick={(e) => { e.stopPropagation(); setMenu(true) }}><Icon name="more" size={18} /></button>
         </div>
         {post.body && <div className="post-body"><RichText text={post.body} /></div>}
         <Media media={post.media} />
+        {post.link && !post.media?.length && !post.quote && <LinkCard link={post.link} />}
         {post.poll && <PollView postId={post.id} poll={post.poll} own={a.id === me?.id} />}
         {post.quote && <QuoteCard post={post.quote} />}
         <div className="actions">
@@ -131,6 +160,11 @@ export function PostCard({ post: initial, threaded = false, focus = false, hideG
       {menu && (
         <Sheet onClose={() => setMenu(false)}>
           <div className="menu" onClick={(e) => e.stopPropagation()}>
+            {a.id === me?.id && Date.now() - Date.parse(post.created_at) < 15 * 60000 && (
+              <button onClick={() => { setMenu(false); compose({ edit: post, onSaved: (p) => setPost((x) => ({ ...x, ...p, liked: x.liked, saved: x.saved, pinned: x.pinned })) }) }}>
+                <Icon name="edit" />რედაქტირება
+              </button>
+            )}
             {a.id === me?.id && !post.parent_id && !post.group_id && (
               <button onClick={async () => {
                 setMenu(false)
