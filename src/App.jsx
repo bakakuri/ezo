@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy as reactLazy, Suspense } from 'react'
 import { RouterProvider, useLocation, match } from './lib/router.jsx'
 import { AuthProvider, useAuth } from './lib/auth.jsx'
 import { ToastProvider } from './components/Toast.jsx'
@@ -15,6 +15,20 @@ import NewPassword from './pages/NewPassword.jsx'
 import MfaPrompt from './pages/MfaPrompt.jsx'
 import { InviteClaimer, OfflineBar } from './components/Growth.jsx'
 import Home from './pages/Home.jsx'
+import { ErrorBoundary } from './components/ErrorBoundary.jsx'
+
+// ახალი ვერსიის გამოსვლის შემდეგ ღია გვერდის ძველი ნაწილები (chunk) აღარ არსებობს — ერთხელ თავიდან ჩავტვირთავთ
+const lazy = (load) => reactLazy(() => load().catch((err) => {
+  const KEY = 'ezo.chunk-reload'
+  let last = 0
+  try { last = Number(sessionStorage.getItem(KEY)) || 0 } catch { /* */ }
+  if (Date.now() - last > 30000) {
+    try { sessionStorage.setItem(KEY, String(Date.now())) } catch { /* */ }
+    window.location.reload()
+    return new Promise(() => {})
+  }
+  throw err
+}))
 
 const Explore = lazy(() => import('./pages/Explore.jsx'))
 const Reels = lazy(() => import('./pages/Reels.jsx'))
@@ -109,11 +123,13 @@ function Routes() {
     <div className={`app${opts.full ? '' : ' with-side'}`}>
       {!opts.full && <SideNav />}
       <main className={`main${opts.full ? ' full' : ''}${opts.flush ? ' flush' : ''}`} style={opts.noNav ? { paddingBottom: 0 } : undefined}>
-        <Suspense fallback={<Loader />}>
-          <div className="page" key={path}>
-            {found ? found.el : <Empty icon="search" title="გვერდი ვერ მოიძებნა" action={<Link to="/" className="btn btn-primary">მთავარზე</Link>} />}
-          </div>
-        </Suspense>
+        <ErrorBoundary resetKey={path}>
+          <Suspense fallback={<Loader />}>
+            <div className="page" key={path}>
+              {found ? found.el : <Empty icon="search" title="გვერდი ვერ მოიძებნა" action={<Link to="/" className="btn btn-primary">მთავარზე</Link>} />}
+            </div>
+          </Suspense>
+        </ErrorBoundary>
       </main>
       {!opts.full && !opts.noAside && <Aside />}
       {!opts.noNav && <BottomNav dark={opts.dark} />}

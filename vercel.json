@@ -5,7 +5,7 @@
       "has": [{ "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|Facebot|meta-externalagent|Twitterbot|TelegramBot|WhatsApp|Slackbot|LinkedInBot|Discordbot|Viber|vkShare|SkypeUriPreview|Pinterest|redditbot|Googlebot|bingbot).*" }],
       "destination": "/api/og?path=/:kind/:key"
     },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    { "source": "/((?!api/|assets/).*)", "destination": "/index.html" }
   ],
   "headers": [
     { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },

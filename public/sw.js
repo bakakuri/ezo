@@ -1,5 +1,5 @@
 // ეზო — სერვის-ვორკერი: Push შეტყობინებები, offline რეჟიმი, შრიფტის და ფოტოების ქეში
-const CACHE = 'ezo-v3'
+const CACHE = 'ezo-v4'
 const FONTS = 'ezo-fonts-v1'
 const IMAGES = 'ezo-img-v1'
 const KEEP = [CACHE, FONTS, IMAGES]
@@ -29,7 +29,9 @@ function cacheFirst(req, name, max) {
     const hit = await c.match(req)
     if (hit) return hit
     const res = await fetch(req).catch(() => Response.error())
-    if (res.ok || res.type === 'opaque') {
+    // HTML JS/CSS ფაილის ადგილას (ძველი ვერსიის chunk) არასდროს შევინახოთ
+    const html = (res.headers.get('content-type') || '').includes('text/html') && req.mode !== 'navigate'
+    if ((res.ok || res.type === 'opaque') && !html) {
       c.put(req, res.clone())
       if (max) trim(name, max)
     }
