@@ -1,4 +1,96 @@
--- ეზო — სქემის ნაწილი 3/8. გაუშვი 2-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
+-- ეზო — სქემის ნაწილი 3/9. გაუშვი 2-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
+
+-- p_action: 'dismiss' | 'hide_post' | 'delete_post' | 'hide_listing' | 'delete_listing' | 'ban'   (ban: p_days = null → სამუდამოდ)
+create or replace function public.admin_resolve(p_report uuid, p_action text, p_days int default null, p_note text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare r reports; v_target uuid; v_key text;
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  select * into r from reports where id = p_report;
+  if not found then raise exception 'not found'; end if;
+  v_key := public.report_key(r.target_post, r.target_listing, r.target_user);
+  v_target := coalesce(r.target_user, (select author_id from posts where id = r.target_post),
+                       (select seller_id from listings where id = r.target_listing));
+  if p_action = 'hide_post' and r.target_post is not null then
+    update posts set hidden = true where id = r.target_post;
+  elsif p_action = 'delete_post' and r.target_post is not null then
+    delete from posts where id = r.target_post;
+  elsif p_action = 'hide_listing' and r.target_listing is not null then
+    update listings set hidden = true where id = r.target_listing;
+  elsif p_action = 'delete_listing' and r.target_listing is not null then
+    delete from listings where id = r.target_listing;
+  elsif p_action = 'ban' and v_target is not null then
+    perform public.admin_ban(v_target, p_days, coalesce(p_note, r.category));
+  end if;
+  update reports x set status = case when p_action = 'dismiss' then 'dismissed' else 'resolved' end,
+         action = p_action, resolved_by = auth.uid(), resolved_at = now()
+   where x.status = 'open' and public.report_key(x.target_post, x.target_listing, x.target_user) = v_key;
+end $$;
+
+create or replace function public.admin_ban(p_user uuid, p_days int default null, p_note text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  if (select role from profiles where id = p_user) in ('moderator', 'admin') then raise exception 'მოდერატორს ვერ დაბლოკავ'; end if;
+  update profiles set
+    banned_until = case when p_days is null then 'infinity'::timestamptz else now() + make_interval(days => p_days) end,
+    ban_reason = p_note
+   where id = p_user;
+  update dating_profiles set enabled = false where user_id = p_user;
+end $$;
+
+create or replace function public.admin_unban(p_user uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  update profiles set banned_until = null, ban_reason = null where id = p_user;
+end $$;
+
+create or replace function public.admin_stats()
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  return jsonb_build_object(
+    'users', (select count(*) from profiles where onboarded),
+    'new_users_7d', (select count(*) from profiles where created_at > now() - interval '7 days'),
+    'posts_24h', (select count(*) from posts where created_at > now() - interval '24 hours'),
+    'open_reports', (select count(distinct public.report_key(r.target_post, r.target_listing, r.target_user)) from reports r where status = 'open'),
+    'banned', (select count(*) from profiles where banned_until > now()),
+    'active_games', (select count(*) from games where status = 'active'));
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Push შეტყობინებები (Web Push). ჩართვა — იხ. README, „Push შეტყობინებები“.
+-- ---------------------------------------------------------------------
+do $$ begin
+  create extension if not exists pg_net;
+exception when others then raise notice 'pg_net მიუწვდომელია — push არ იმუშავებს';
+end $$;
+
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles on delete cascade,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  user_agent text,
+  created_at timestamptz not null default now()
+);
+create index if not exists push_subs_user_idx on public.push_subscriptions (user_id);
+
+-- სერვერის საიდუმლოებები (Edge Function-ის მისამართი და გასაღები). კლიენტს წვდომა არ აქვს.
+create table if not exists public.app_secrets (
+  key text primary key,
+  value text not null
+);
+
+-- push_dispatch (Push-ის გაგზავნა) ფაილის ბოლოსაა — ეტაპი D (შეტყობინებების პარამეტრებით)
+
+create or replace function public.game_title(p_type text)
+returns text language sql immutable as $$
+  select case p_type when 'nardi' then 'ნარდი' when 'longnardi' then 'გრძელი ნარდი' when 'chess' then 'ჭადრაკი'
+    when 'checkers' then 'შაშკი' when 'domino' then 'დომინო' when 'durak' then 'დურაკი' when 'joker' then 'ჯოკერი' else p_type end;
+$$;
 
 create or replace function public.on_notification_push()
 returns trigger language plpgsql security definer set search_path = public as $$
@@ -401,152 +493,3 @@ begin
   update conversations set title = left(btrim(p_title), 80) where id = p_conv and kind = 'group';
   insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(), 'შეცვალა სახელი: „' || left(btrim(p_title), 80) || '“', '{"system": true}');
 end $$;
-
-create or replace function public.chat_members(p_conv uuid)
-returns table (id uuid, username text, full_name text, avatar_url text, last_seen timestamptz, role text)
-language sql stable security definer set search_path = public as $$
-  select p.id, p.username, p.full_name, p.avatar_url, p.last_seen, m.role
-  from conversation_members m join profiles p on p.id = m.user_id
-  where m.conversation_id = p_conv and public.is_member(p_conv)
-  order by m.role, p.full_name;
-$$;
-
--- ---------------------------------------------------------------------
--- ზარები (WebRTC). მოწვევა ბაზაშია — აბონენტის ვინაობა ყალბდება ვერ;
--- SDP/ICE იცვლება Realtime არხზე „call:<id>“ (id შემთხვევითი UUID-ია და მხოლოდ ორმა იცის).
--- ---------------------------------------------------------------------
-create table if not exists public.calls (
-  id uuid primary key default gen_random_uuid(),
-  conversation_id uuid not null references public.conversations on delete cascade,
-  caller_id uuid not null references public.profiles on delete cascade,
-  callee_id uuid not null references public.profiles on delete cascade,
-  kind text not null check (kind in ('audio', 'video')),
-  status text not null default 'ringing' check (status in ('ringing', 'accepted', 'declined', 'missed', 'ended', 'busy')),
-  created_at timestamptz not null default now(),
-  answered_at timestamptz,
-  ended_at timestamptz,
-  check (caller_id <> callee_id)
-);
-create index if not exists calls_callee_idx on public.calls (callee_id, created_at desc);
-
-create or replace function public.before_call_insert()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if (select kind from conversations where id = new.conversation_id) not in ('dm', 'dating')
-     or not exists (select 1 from conversation_members where conversation_id = new.conversation_id and user_id = new.callee_id)
-     or not exists (select 1 from conversation_members where conversation_id = new.conversation_id and user_id = new.caller_id)
-     or public.is_blocked(new.caller_id, new.callee_id) then
-    raise exception 'ზარი ამ ჩატში შეუძლებელია';
-  end if;
-  new.status := 'ringing'; new.answered_at := null; new.ended_at := null; new.created_at := now();
-  return new;
-end $$;
-drop trigger if exists calls_before_insert on public.calls;
-create trigger calls_before_insert before insert on public.calls
-  for each row execute function public.before_call_insert();
-
--- დაშვებული გადასვლები: ringing → accepted/declined/busy (პასუხისმგებელი), ringing → missed/ended (დამრეკი),
--- accepted → ended (ორივე). დასრულებული ზარი აღარ იცვლება.
-create or replace function public.before_call_update()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_me uuid := auth.uid();
-begin
-  if old.status in ('declined', 'missed', 'ended', 'busy') then raise exception 'ზარი უკვე დასრულებულია'; end if;
-  new.id := old.id; new.conversation_id := old.conversation_id; new.caller_id := old.caller_id;
-  new.callee_id := old.callee_id; new.kind := old.kind; new.created_at := old.created_at;
-  if old.status = 'ringing' then
-    if new.status in ('accepted', 'declined', 'busy') and v_me is distinct from old.callee_id then raise exception 'not allowed'; end if;
-    if new.status = 'missed' and v_me is distinct from old.caller_id then raise exception 'not allowed'; end if;
-    if new.status = 'ended' and v_me is distinct from old.caller_id then raise exception 'not allowed'; end if;
-  elsif old.status = 'accepted' then
-    if new.status <> 'ended' then raise exception 'not allowed'; end if;
-  end if;
-  if new.status = 'accepted' then new.answered_at := now(); end if;
-  if new.status in ('declined', 'missed', 'ended', 'busy') then
-    new.ended_at := now();
-    if new.status = 'ended' and old.status = 'ringing' then new.status := 'missed'; end if;
-  end if;
-  return new;
-end $$;
-drop trigger if exists calls_before_update on public.calls;
-create trigger calls_before_update before update on public.calls
-  for each row execute function public.before_call_update();
-
-create or replace function public.after_call_change()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_caller text;
-begin
-  if tg_op = 'INSERT' then
-    select coalesce(nullif(full_name, ''), username) into v_caller from profiles where id = new.caller_id;
-    perform public.push_dispatch(new.callee_id, jsonb_build_object(
-      'title', coalesce(v_caller, 'ეზო'),
-      'body', case new.kind when 'video' then '📹 შემომავალი ვიდეოზარი' else '📞 შემომავალი ზარი' end,
-      'url', '/chat/' || new.conversation_id, 'tag', 'call-' || new.id));
-  elsif new.status in ('declined', 'missed', 'ended', 'busy') and old.status not in ('declined', 'missed', 'ended', 'busy') then
-    insert into messages (conversation_id, sender_id, body, meta) values (new.conversation_id, new.caller_id, '',
-      jsonb_build_object('call', jsonb_build_object('id', new.id, 'kind', new.kind, 'status', new.status,
-        'duration', case when new.answered_at is not null then extract(epoch from new.ended_at - new.answered_at)::int else 0 end)));
-  end if;
-  return new;
-end $$;
-drop trigger if exists calls_after_change on public.calls;
-create trigger calls_after_change after insert or update on public.calls
-  for each row execute function public.after_call_change();
-
--- Push: ჯგუფური ჩატის სახელი; ზარის მესიჯს ცალკე push არ სჭირდება
-create or replace function public.on_message_push()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_sender text; v_member uuid; v_kind text; v_title text; v_text text;
-begin
-  if new.meta ? 'call' then return new; end if;
-  select coalesce(nullif(full_name, ''), username) into v_sender from profiles where id = new.sender_id;
-  select kind, title into v_kind, v_title from conversations where id = new.conversation_id;
-  v_text := case new.media_type when 'image' then '📷 ფოტო' when 'audio' then '🎙 ხმოვანი მესიჯი' else left(new.body, 140) end;
-  for v_member in
-    select user_id from conversation_members where conversation_id = new.conversation_id and user_id <> new.sender_id
-  loop
-    perform public.push_dispatch(v_member, jsonb_build_object(
-      'title', case when v_kind = 'group' then coalesce(v_title, 'ჯგუფური ჩატი') else coalesce(v_sender, 'ეზო') end,
-      'body', case when v_kind = 'group' then coalesce(v_sender, '') || ': ' || v_text else v_text end,
-      'url', '/chat/' || new.conversation_id,
-      'tag', 'conv-' || new.conversation_id));
-  end loop;
-  return new;
-end $$;
-
--- ---------------------------------------------------------------------
--- v4 RLS + Realtime
--- ---------------------------------------------------------------------
-alter table public.message_reactions enable row level security;
-alter table public.calls enable row level security;
-
-drop policy if exists "reactions read" on public.message_reactions;
-drop policy if exists "reactions own" on public.message_reactions;
-create policy "reactions read" on public.message_reactions for select to authenticated using (public.is_member(conversation_id));
-create policy "reactions own" on public.message_reactions for all to authenticated
-  using (user_id = auth.uid())
-  with check (user_id = auth.uid() and exists (select 1 from public.messages m where m.id = message_id and public.is_member(m.conversation_id)));
-
-drop policy if exists "calls read" on public.calls;
-drop policy if exists "calls start" on public.calls;
-drop policy if exists "calls update" on public.calls;
-create policy "calls read" on public.calls for select to authenticated using (auth.uid() in (caller_id, callee_id));
-create policy "calls start" on public.calls for insert to authenticated with check (caller_id = auth.uid() and public.can_act());
-create policy "calls update" on public.calls for update to authenticated using (auth.uid() in (caller_id, callee_id));
-
-do $$ begin
-  begin alter publication supabase_realtime add table public.message_reactions; exception when duplicate_object then null; end;
-  begin alter publication supabase_realtime add table public.calls; exception when duplicate_object then null; end;
-end $$;
--- წაშლილი მესიჯის სრული მონაცემი Realtime-ში
-alter table public.messages replica identity full;
-alter table public.message_reactions replica identity full;
-
--- =====================================================================
---  v5: ჯოკერის მაგიდები (4 ადგილი + კომპიუტერი), ბლიცი, ტურნირები (არენა)
--- =====================================================================
-create or replace function public.seat_user(v_g public.games, p_seat text)
-returns uuid language sql immutable as $$
-  select case p_seat when 'a' then v_g.player_a when 'w' then v_g.player_a when 'b' then v_g.player_b
-    when 'c' then v_g.player_c when 'd' then v_g.player_d end;
-$$;

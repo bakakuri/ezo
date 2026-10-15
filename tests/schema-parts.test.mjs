@@ -1,10 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
-import { splitSchema, partHeader, PARTS } from '../scripts/split-schema.mjs'
+import { splitSchema, partHeader, partsFor } from '../scripts/split-schema.mjs'
 
 const schema = readFileSync(new URL('../supabase/schema.sql', import.meta.url), 'utf8')
 const parts = splitSchema(schema)
+const PARTS = partsFor(schema)
 
 test('schema parts: committed parts equal a fresh split of schema.sql', () => {
   const files = readdirSync(new URL('../supabase/parts/', import.meta.url)).filter((f) => /^schema-\d+\.sql$/.test(f))

@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { writeFileSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as chess from '../../src/games/chess.js'
+import * as chess960 from '../../src/games/chess960.js'
 import { skeleton } from '../../src/lib/translit.js'
 
 const OUT = resolve(process.argv[2] || '.real-stack')
@@ -398,6 +399,36 @@ await step('I: group poll — create, vote, change, multi rules, realtime row', 
   const dm = await A.openDM(pb.id)
   await A.sendChatPoll(dm, { question: 'x', options: ['a', 'b'] }).then(() => { throw new Error('poll in DM') }, () => {})
   must((await A.conversations()).find((c) => c.id === g).last_message.startsWith('📊'), 'poll preview')
+})
+
+// ---- ეტაპი J: ჭადრაკი 960, ხუთი რიგში, პარტიის ჩანაწერი
+await step('J: chess960 + gomoku via function; replay of finished games', async () => {
+  const id9 = await A.createGame('chess960', pb.id, { tc: '3+2' })
+  await B.joinGame(id9)
+  let g9 = await A.game(id9)
+  must(g9.status === 'active' && / w [A-H]{2}[a-h]{2} /.test(g9.state.fen) && g9.clock, '960 start ' + g9.state.fen)
+  const w = g9.player_a === pa.id ? A : B
+  const mv = chess960.legalMoves(chess.fromFEN(g9.state.fen)).find((m) => !m.flag?.startsWith?.('castle'))
+  await w.move(id9, { from: mv.from, to: mv.to }, g9.move_no)
+  await w.move(id9, { from: 0, to: 63 }, g9.move_no + 1).then(() => { throw new Error('illegal 960 move accepted') }, () => {})
+  const idg = await A.createGame('gomoku', pb.id)
+  await B.joinGame(idg)
+  let gg = await A.game(idg)
+  const first = gg.player_a === pa.id ? A : B
+  const second = first === A ? B : A
+  await first.move(idg, { at: 112 }, gg.move_no)
+  await second.move(idg, { at: 112 }, gg.move_no + 1).then(() => { throw new Error('occupied cell accepted') }, () => {})
+  await second.move(idg, { at: 113 }, gg.move_no + 1)
+  gg = await A.game(idg)
+  must(gg.state.board[112] === 'a' && gg.state.board[113] === 'b' && gg.state.count === 2, 'gomoku board')
+  await B.resign(id9); await B.resign(idg)
+  const recent = await A.recentGames()
+  must(recent.length >= 3 && recent.every((g) => g.status === 'finished' && g.a && g.b), 'recent ' + recent.map((g) => g.type))
+  const r = await B.replay(idg)
+  must(r.game.id === idg && r.moves.map((m) => m.n).join() === '0,1,2' && r.moves[2].state.board[113] === 'b', 'replay ' + JSON.stringify(r.moves.map((m) => m.n)))
+  const r9 = await C.replay(id9)
+  must(r9.moves.length === 2 && r9.moves[0].state.fen !== r9.moves[1].state.fen, 'outsider replay')
+  must(Number(sql(`select count(*) from public.game_moves m join public.games g on g.id = m.game_id where g.type = 'joker'`)) === 0, 'card game recorded')
 })
 
 // ---- საჯარო ფუნქციები anon გასაღებით (Vercel-ის og.js და sitemap.js ასე იძახებს)

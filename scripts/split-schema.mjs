@@ -1,10 +1,13 @@
-// schema.sql-ის დაყოფა 8 ნაწილად — ტელეფონიდან SQL Editor-ში ჩასასმელად (დიდი ტექსტი ტელეფონზე ძნელად ჩაისმება).
-// ნაწილები გაუშვი თანმიმდევრობით: 1 → 8. ერთად აწყობილი ზუსტად schema.sql-ია (ამოწმებს tests/schema-parts.test.mjs).
+// schema.sql-ის დაყოფა ნაწილებად (მინიმუმ 8, თითო ~30 ათას სიმბოლომდე) — ტელეფონიდან SQL Editor-ში ჩასასმელად (დიდი ტექსტი ტელეფონზე ძნელად ჩაისმება).
+// ნაწილები გაუშვი თანმიმდევრობით: 1, 2, 3 … ერთად აწყობილი ზუსტად schema.sql-ია (ამოწმებს tests/schema-parts.test.mjs).
 // გაშვება (schema.sql-ის ყოველი ცვლილების შემდეგ): node scripts/split-schema.mjs
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-export const PARTS = 8
+export const MIN_PARTS = 8
+export const PART_TARGET = 30000
+// რამდენ ნაწილად დაიყოს: სქემა იზრდება — ნაწილების რაოდენობაც თავისით იზრდება
+export const partsFor = (sql) => Math.max(MIN_PARTS, Math.ceil(sql.length / PART_TARGET))
 
 export const partHeader = (n, total) =>
   `-- ეზო — სქემის ნაწილი ${n}/${total}. ${n === 1 ? 'გაუშვი პირველი.' : `გაუშვი ${n - 1}-ის შემდეგ.`} (მთლიანი ფაილი: supabase/schema.sql)\n`
@@ -25,7 +28,7 @@ export function safeCuts(sql) {
   return cuts
 }
 
-export function splitSchema(sql, parts = PARTS) {
+export function splitSchema(sql, parts = partsFor(sql)) {
   const safe = safeCuts(sql)
   const cuts = []
   for (let k = 1; k < parts; k++) {

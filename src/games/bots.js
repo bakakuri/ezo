@@ -1,6 +1,8 @@
 // კომპიუტერი-მოწინააღმდეგე ოთხივე თამაშისთვის.
 // ჭადრაკი/შაშკი: 2 სვლის სიღრმე მატერიალზე; ნარდი: ევრისტიკა; დომინო: ხარბი.
 import * as chess from './chess.js'
+import * as chess960 from './chess960.js'
+import * as gomoku from './gomoku.js'
 import * as checkers from './checkers.js'
 import * as nardi from './nardi.js'
 import * as domino from './domino.js'
@@ -24,26 +26,39 @@ function material(s, color) {
   return v
 }
 
-export function chessBot(state) {
+// ჭადრაკი და ჭადრაკი 960: იგივე ალგორითმი, სვლების წესები — ძრავიდან
+const CHESS_RULES = { legalMoves: chess.legalMoves, makeMove: chess.makeMove, applyToState: chess.applyToState }
+const C960_RULES = {
+  legalMoves: (s) => chess960.legalMoves(s).filter((m) => !(m.flag === 'castle960' && m.to !== m.rook)),
+  makeMove: chess960.makeMove,
+  applyToState: chess960.applyToState,
+}
+function chessLike(state, R) {
   const s = chess.fromFEN(state.fen)
   const me = s.turn
   let best = null
   let bestScore = -Infinity
-  for (const m of chess.legalMoves(s)) {
+  for (const m of R.legalMoves(s)) {
     if (m.promo && m.promo !== 'q') continue
-    const n = chess.makeMove(s, m)
-    const replies = chess.legalMoves(n)
+    const n = R.makeMove(s, m)
+    const replies = R.legalMoves(n)
     let score
     if (!replies.length) score = chess.inCheck(n) ? 1e6 : -50
     else {
       score = Infinity
-      for (const r of replies) score = Math.min(score, material(chess.makeMove(n, r), me))
+      for (const r of replies) score = Math.min(score, material(R.makeMove(n, r), me))
       if (chess.inCheck(n)) score += 15
     }
     score += cryptoRand() * 10
     if (score > bestScore) { bestScore = score; best = m }
   }
-  return best ? chess.applyToState(state, best) : state
+  return best ? R.applyToState(state, best) : state
+}
+export const chessBot = (state) => chessLike(state, CHESS_RULES)
+export const chess960Bot = (state) => chessLike(state, C960_RULES)
+export function gomokuBot(state, rand = cryptoRand) {
+  const i = gomoku.bestMove(state, rand)
+  return i >= 0 ? gomoku.play(state, i) : state
 }
 
 function ckEval(s, color) {
@@ -317,7 +332,7 @@ export function buraBot(s) {
 }
 
 export const BOTS = {
-  chess: chessBot, checkers: checkersBot, nardi: nardiBot, domino: dominoBot,
+  chess: chessBot, chess960: chess960Bot, gomoku: gomokuBot, checkers: checkersBot, nardi: nardiBot, domino: dominoBot,
   longnardi: longnardiBot, durak: durakBot, joker: jokerBot, bura: buraBot,
   loto: (s) => s,
 }

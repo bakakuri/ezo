@@ -12,7 +12,7 @@ export class HttpError extends Error {
 
 // ბლიცი: საათი ჭადრაკსა და შაშკში
 export const TIME_CONTROLS = { '1+0': [1, 0], '3+0': [3, 0], '3+2': [3, 2], '5+0': [5, 0], '10+0': [10, 0] }
-const CLOCK_GAMES = new Set(['chess', 'checkers'])
+const CLOCK_GAMES = new Set(['chess', 'chess960', 'checkers'])
 export const ABORT_AFTER = 60_000
 
 const seatsIn = (g) => SEAT_LETTERS.slice(0, g.seats || 2)
@@ -279,7 +279,7 @@ export async function handle(body, { userId, db, rand = cryptoRand, now = Date.n
   async function finishOnTime(g, loserSeat) {
     const winSeat = loserSeat === 'a' ? 'b' : 'a'
     // ჭადრაკი: თუ მომგებს მხოლოდ მეფე დარჩა — ფრე
-    if (g.type === 'chess') {
+    if (g.type === 'chess' || g.type === 'chess960') {
       const color = winSeat === 'a' ? 'w' : 'b'
       const pieces = chess.fromFEN(g.state.fen).board.filter((p) => p && chess.colorOf(p) === color)
       if (pieces.length === 1) { await db.finish(g.id, null, 'timeout'); return }

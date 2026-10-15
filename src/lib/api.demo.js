@@ -7,7 +7,8 @@ import { skeleton, matches } from './translit.js'
 import { demoRewards } from './demoRewards.js'
 import { GIFT_PRICES } from './rewards.js'
 import { BOTS } from '../games/bots.js'
-import { GAMES, outcome, seatsOf, SEAT_LETTERS, loto } from '../games/index.js'
+import { GAMES, outcome, seatsOf, SEAT_LETTERS, loto, chess } from '../games/index.js'
+import { REPLAYABLE } from '../games/hidden.js'
 import { applyAction, initFor, publicState, withMyHand, handsOf } from '../games/server.js'
 
 // ?demoAs=u1 — დემოში სხვა მომხმარებლად შესვლა (მაგ. ზარის ორ ჩანართში შესამოწმებლად)
@@ -1034,9 +1035,21 @@ export const api = {
     return [...games.values()].filter((g) => ['waiting', 'active'].includes(g.status) && seatOfMe(g)).map(gameView)
   },
   async game(id) { return games.has(id) ? gameView(games.get(id)) : null },
+  async recentGames(limit = 10) {
+    await wait(120)
+    seedFinished()
+    return [...games.values()].filter((g) => g.status === 'finished' && seatOfMe(g) && REPLAY.has(g.type))
+      .sort((x, y) => Date.parse(y.updated_at) - Date.parse(x.updated_at)).slice(0, limit).map(gameView)
+  },
+  async replay(id) {
+    await wait(150)
+    seedFinished()
+    const g = games.get(id)
+    return g ? { game: gameView(g), moves: (g.moves || []).map((m) => ({ ...m })) } : null
+  },
   async createGame(type, invite, opts = {}) {
     if (seatsOf(type) > 2) return newTable(type, { mode: opts.mode, invites: opts.invites || (invite ? [invite] : []), isPublic: false }).id
-    if (opts.tc && !['chess', 'checkers'].includes(type)) throw new Error('ასეთი დროის კონტროლი არ არის')
+    if (opts.tc && !['chess', 'chess960', 'checkers'].includes(type)) throw new Error('ასეთი დროის კონტროლი არ არის')
     return newGame(type, invite || 'u2', { tc: opts.tc }).id
   },
   async joinRandom(type, opts = {}) {
@@ -1056,7 +1069,7 @@ export const api = {
       const pool = tplayers.filter((r) => r.tournament_id === t.id && r.user_id !== ME).map((r) => r.user_id)
       return newGame(type, pool[Math.floor(Math.random() * pool.length)] || 'u2', { tc: t.tc, tournament: t.id }).id
     }
-    const opponents = { nardi: 'u7', chess: 'u2', checkers: 'u7', domino: 'u3', longnardi: 'u4', durak: 'u6' }
+    const opponents = { nardi: 'u7', chess: 'u2', chess960: 'u5', checkers: 'u7', gomoku: 'u1', domino: 'u3', longnardi: 'u4', durak: 'u6' }
     return newGame(type, opponents[type] || 'u2', { tc: opts.tc }).id
   },
   async joinGame(id) {
@@ -1393,13 +1406,20 @@ const seatList = (g) => SEAT_LETTERS.slice(0, g.seats || 2)
 const seatOfMe = (g) => seatList(g).find((s) => g[`player_${s}`] === ME && !(g.bots || []).includes(s)) || null
 
 function gameView(g) {
-  const { full, ...rest } = g
+  const { full, moves, ...rest } = g
   const seat = seatOfMe(g)
   const pub = g.status === 'finished' && g.type === 'domino' ? full : publicState(g.type, full)
   const mine = seat && g.status !== 'finished' ? handsOf(g.type, full)?.[seat] : null
   const view = { ...rest, state: withMyHand(g.type, pub, seat, mine) }
   for (const s of seatList(g)) view[s] = g[`player_${s}`] ? person(g[`player_${s}`]) : null
   return view
+}
+
+// პარტიის ჩანაწერი — იგივე, რასაც SQL ტრიგერი record_game_move ინახავს: საჯარო მდგომარეობა ყოველი სვლის შემდეგ
+const REPLAY = new Set(REPLAYABLE)
+function recordMove(g) {
+  if (!REPLAY.has(g.type)) return
+  ;(g.moves ||= []).push({ n: g.move_no, state: publicState(g.type, g.full) })
 }
 
 const baseGame = (type, extra) => ({
@@ -1415,6 +1435,7 @@ function newGame(type, opponent, { tc = null, tournament = null } = {}) {
     clock: TC ? { a: TC[0] * 60000, b: TC[0] * 60000, inc: TC[1] * 1000, at: null } : null,
   })
   g.turn = GAMES[type].seatOf(g.full) === 'a' ? ME : opponent
+  recordMove(g)
   games.set(g.id, g)
   scheduleBots(g)
   return g
@@ -1467,6 +1488,7 @@ function applyFull(g, next) {
   g.full = next
   g.move_no++
   g.updated_at = new Date().toISOString()
+  recordMove(g)
   const o = outcome(g.type, next)
   if (o.over) finishGame(g, o.winner, o.result)
   else g.turn = g[`player_${GAMES[g.type].seatOf(next)}`] || null
@@ -1510,12 +1532,51 @@ function botTurn(g) {
 // ---- სხვების მიმდინარე თამაშები (ყურებისთვის): ორივე მხარეს კომპიუტერი თამაშობს
 function seedLive(type, a, b, moves = 0) {
   const g = baseGame(type, { player_a: a, player_b: b, full: initFor(type), created_at: ago(9), updated_at: ago(1) })
-  for (let i = 0; i < moves && !outcome(type, g.full).over; i++) g.full = BOTS[type](g.full)
-  g.move_no = moves
+  recordMove(g)
+  for (let i = 0; i < moves && !outcome(type, g.full).over; i++) { g.full = BOTS[type](g.full); g.move_no++; recordMove(g) }
   g.turn = g[`player_${GAMES[type].seatOf(g.full)}`] || null
   games.set(g.id, g)
   scheduleBots(g)
 }
+// ჩემი დასრულებული პარტიები (ჩანაწერის საჩვენებლად) — იქმნება პირველ მოთხოვნაზე
+let finishedSeeded = false
+function seedFinished() {
+  if (finishedSeeded) return
+  finishedSeeded = true
+  const done = (type, opp, minAgo, play) => {
+    const g = baseGame(type, { player_b: opp, full: initFor(type), created_at: ago(minAgo + 12), updated_at: ago(minAgo) })
+    recordMove(g)
+    play(g)
+    const o = outcome(type, g.full)
+    g.status = 'finished'
+    g.turn = null
+    g.result = o.over ? o.result : 'resign'
+    g.winner = o.over ? (o.winner ? g[`player_${o.winner}`] : null) : opp
+    games.set(g.id, g)
+  }
+  const step = (g, next) => { g.full = next; g.move_no++; recordMove(g) }
+  // ჭადრაკი: „ბავშვური მათი“ — მე თეთრებით
+  done('chess', 'u5', 50, (g) => {
+    for (const [f, t] of [['e2', 'e4'], ['e7', 'e5'], ['f1', 'c4'], ['b8', 'c6'], ['d1', 'h5'], ['g8', 'f6'], ['h5', 'f7']]) {
+      step(g, applyAction('chess', g.full, { from: chess.sqIndex(f), to: chess.sqIndex(t) }))
+    }
+  })
+  // ხუთი რიგში და ნარდი — კომპიუტერი ორივე მხარეს
+  done('gomoku', 'u1', 190, (g) => {
+    // კომპიუტერი კომპიუტერთან ხანდახან მთელ დაფას ავსებს — საჩვენებლად მოკლე, მოგებით დასრულებული პარტია ავირჩიოთ
+    for (let t = 0; t < 8; t++) {
+      g.full = initFor('gomoku')
+      g.move_no = 0
+      g.moves = []
+      recordMove(g)
+      for (let i = 0; i < 90 && !outcome('gomoku', g.full).over; i++) step(g, BOTS.gomoku(g.full))
+      if (outcome('gomoku', g.full).winner) return
+    }
+  })
+  done('nardi', 'u7', 1500, (g) => { for (let i = 0; i < 900 && !outcome('nardi', g.full).over; i++) step(g, BOTS.nardi(g.full)) })
+  done('domino', 'u3', 2900, (g) => { for (let i = 0; i < 300 && !outcome('domino', g.full).over; i++) step(g, BOTS.domino(g.full)) })
+}
+
 if (typeof window !== 'undefined') {
   seedLive('chess', 'u2', 'u7', 14)
   seedLive('nardi', 'u5', 'u1', 6)

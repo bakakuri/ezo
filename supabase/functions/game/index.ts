@@ -247,13 +247,258 @@ function applyToState(state, move) {
   return { fen: toFEN(next), turn: next.turn, last: [move.from, move.to], count: state.count + 1 };
 }
 
+// src/games/chess960.js
+var FILES2 = "abcdefgh";
+var KNIGHTS = [[0, 1], [0, 2], [0, 3], [0, 4], [1, 2], [1, 3], [1, 4], [2, 3], [2, 4], [3, 4]];
+function backRank(n) {
+  const pos2 = Array(8).fill(null);
+  let k = n;
+  pos2[k % 4 * 2 + 1] = "B";
+  k = Math.floor(k / 4);
+  pos2[k % 4 * 2] = "B";
+  k = Math.floor(k / 4);
+  const free = () => pos2.map((p, i) => p ? -1 : i).filter((i) => i >= 0);
+  pos2[free()[k % 6]] = "Q";
+  k = Math.floor(k / 6);
+  const [n1, n2] = KNIGHTS[k];
+  const f = free();
+  pos2[f[n1]] = "N";
+  pos2[f[n2]] = "N";
+  const [r1, kk, r2] = free();
+  pos2[r1] = "R";
+  pos2[kk] = "K";
+  pos2[r2] = "R";
+  return pos2.join("");
+}
+function startFEN(n) {
+  const w = backRank(n);
+  const rooks = [...w].map((p, i) => p === "R" ? FILES2[i] : "").join("");
+  const castle = rooks.split("").reverse().join("").toUpperCase() + rooks.split("").reverse().join("");
+  return `${w.toLowerCase()}/pppppppp/8/8/8/8/PPPPPPPP/${w} w ${castle} - 0 1`;
+}
+function initState2(rand = Math.random) {
+  const n = Math.floor(rand() * 960) % 960;
+  return { fen: startFEN(n), turn: "w", last: null, count: 0, n };
+}
+var backRow = (color) => color === "w" ? 7 : 0;
+var rightsOf = (castling, color) => [...castling || ""].filter((c) => color === "w" ? c === c.toUpperCase() : c === c.toLowerCase());
+function castleMoves(s) {
+  const color = s.turn;
+  const enemy = color === "w" ? "b" : "w";
+  const row = backRow(color);
+  const K = color === "w" ? "K" : "k";
+  const R = color === "w" ? "R" : "r";
+  const kSq = s.board.indexOf(K);
+  if (kSq < 0 || kSq >> 3 !== row || inCheck(s, color)) return [];
+  const kf = kSq & 7;
+  const out = [];
+  for (const letter of rightsOf(s.castling, color)) {
+    const rf = FILES2.indexOf(letter.toLowerCase());
+    const rSq = row * 8 + rf;
+    if (s.board[rSq] !== R) continue;
+    const kingSide = rf > kf;
+    const kt = kingSide ? 6 : 2;
+    const rt = kingSide ? 5 : 3;
+    const lo = Math.min(kf, kt, rf, rt);
+    const hi = Math.max(kf, kt, rf, rt);
+    let clear = true;
+    for (let f = lo; f <= hi; f++) {
+      const sq = row * 8 + f;
+      if (sq !== kSq && sq !== rSq && s.board[sq]) {
+        clear = false;
+        break;
+      }
+    }
+    if (!clear) continue;
+    const board = s.board.slice();
+    board[kSq] = null;
+    board[rSq] = null;
+    let safe = true;
+    for (let f = Math.min(kf, kt); f <= Math.max(kf, kt); f++) {
+      if (isAttacked(board, row * 8 + f, enemy)) {
+        safe = false;
+        break;
+      }
+    }
+    if (!safe) continue;
+    board[row * 8 + kt] = K;
+    board[row * 8 + rt] = R;
+    if (isAttacked(board, row * 8 + kt, enemy)) continue;
+    out.push({ from: kSq, to: rSq, flag: "castle960", rook: rSq, kingTo: row * 8 + kt, rookTo: row * 8 + rt });
+  }
+  return out;
+}
+function legalMoves2(s) {
+  const normal = legalMoves(s);
+  const castles = castleMoves(s);
+  const aliases = castles.filter((c) => c.kingTo !== c.from && c.kingTo !== c.rook && !normal.some((m) => m.from === c.from && m.to === c.kingTo)).map((c) => ({ ...c, to: c.kingTo }));
+  return [...normal, ...castles, ...aliases];
+}
+function makeMove2(s, m) {
+  const color = s.turn;
+  const enemy = color === "w" ? "b" : "w";
+  let next;
+  if (m.flag === "castle960") {
+    const board = s.board.slice();
+    const K = board[m.from];
+    const R = board[m.rook];
+    board[m.from] = null;
+    board[m.rook] = null;
+    board[m.kingTo] = K;
+    board[m.rookTo] = R;
+    next = { board, turn: enemy, castling: s.castling, ep: null, half: s.half + 1, full: color === "b" ? s.full + 1 : s.full };
+  } else {
+    next = makeMove(s, m);
+  }
+  let castling = s.castling || "";
+  const piece = s.board[m.from];
+  if (piece && piece.toLowerCase() === "k") castling = [...castling].filter((c) => !rightsOf(castling, color).includes(c)).join("");
+  for (const sq of [m.from, m.to]) {
+    const row = sq >> 3;
+    for (const c of ["w", "b"]) {
+      if (row !== backRow(c)) continue;
+      const letter = c === "w" ? FILES2[sq & 7].toUpperCase() : FILES2[sq & 7];
+      if (castling.includes(letter) && s.board[sq] && s.board[sq].toLowerCase() === "r" && colorOf(s.board[sq]) === c) castling = castling.replace(letter, "");
+    }
+  }
+  return { ...next, castling };
+}
+function insufficient2(board) {
+  const rest = board.filter((p) => p && p.toLowerCase() !== "k");
+  if (rest.length === 0) return true;
+  return rest.length === 1 && ["n", "b"].includes(rest[0].toLowerCase());
+}
+function status2(s) {
+  const check = inCheck(s);
+  const moves = legalMoves2(s);
+  if (!moves.length) {
+    return check ? { over: true, result: "checkmate", winner: s.turn === "w" ? "b" : "w", check } : { over: true, result: "stalemate", winner: null, check };
+  }
+  if (s.half >= 100) return { over: true, result: "fifty", winner: null, check };
+  if (insufficient2(s.board)) return { over: true, result: "material", winner: null, check };
+  return { over: false, result: null, winner: null, check };
+}
+function applyToState2(state, move) {
+  const next = makeMove2(fromFEN(state.fen), move);
+  const shown = move.flag === "castle960" ? [move.from, move.kingTo] : [move.from, move.to];
+  return { ...state, fen: toFEN(next), turn: next.turn, last: shown, count: state.count + 1 };
+}
+
+// src/games/gomoku.js
+var N = 15;
+var DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
+var other = (s) => s === "a" ? "b" : "a";
+function initState3() {
+  return { board: ".".repeat(N * N), turn: "a", last: null, count: 0, line: null, winner: null };
+}
+var at = (board, r, c) => r >= 0 && r < N && c >= 0 && c < N ? board[r * N + c] : null;
+function lineThrough(board, i) {
+  const p = board[i];
+  const r0 = Math.floor(i / N);
+  const c0 = i % N;
+  for (const [dr, dc] of DIRS) {
+    const cells = [i];
+    for (const sgn of [1, -1]) {
+      let r = r0 + dr * sgn;
+      let c = c0 + dc * sgn;
+      while (at(board, r, c) === p) {
+        cells.push(r * N + c);
+        r += dr * sgn;
+        c += dc * sgn;
+      }
+    }
+    if (cells.length >= 5) return cells.sort((a, b) => a - b);
+  }
+  return null;
+}
+var isOver = (state) => Boolean(state.winner) || state.draw === true;
+function play(state, i) {
+  if (isOver(state)) throw new Error("\u10D7\u10D0\u10DB\u10D0\u10E8\u10D8 \u10D3\u10D0\u10E1\u10E0\u10E3\u10DA\u10D4\u10D1\u10E3\u10DA\u10D8\u10D0");
+  if (!Number.isInteger(i) || i < 0 || i >= N * N || state.board[i] !== ".") throw new Error("\u10D4\u10E1 \u10E3\u10EF\u10E0\u10D0 \u10D3\u10D0\u10D9\u10D0\u10D5\u10D4\u10D1\u10E3\u10DA\u10D8\u10D0");
+  const board = state.board.slice(0, i) + state.turn + state.board.slice(i + 1);
+  const line = lineThrough(board, i);
+  const full = !board.includes(".");
+  return {
+    board,
+    turn: line || full ? state.turn : other(state.turn),
+    last: i,
+    count: state.count + 1,
+    line,
+    winner: line ? state.turn : null,
+    draw: !line && full
+  };
+}
+var SCORE = { five: 1e7, open4: 2e5, four: 2e4, open3: 8e3, three: 600, open2: 300, two: 40, one: 6 };
+function patternScore(board, i, p) {
+  const r0 = Math.floor(i / N);
+  const c0 = i % N;
+  let total = 0;
+  for (const [dr, dc] of DIRS) {
+    let count3 = 1;
+    let open = 0;
+    for (const sgn of [1, -1]) {
+      let r = r0 + dr * sgn;
+      let c = c0 + dc * sgn;
+      while (at(board, r, c) === p) {
+        count3++;
+        r += dr * sgn;
+        c += dc * sgn;
+      }
+      if (at(board, r, c) === ".") open++;
+    }
+    if (count3 >= 5) total += SCORE.five;
+    else if (count3 === 4) total += open === 2 ? SCORE.open4 : open === 1 ? SCORE.four : 0;
+    else if (count3 === 3) total += open === 2 ? SCORE.open3 : open === 1 ? SCORE.three : 0;
+    else if (count3 === 2) total += open === 2 ? SCORE.open2 : open === 1 ? SCORE.two : 0;
+    else if (open) total += SCORE.one * open;
+  }
+  return total;
+}
+function candidates(board, radius = 2) {
+  const out = [];
+  if (!board.includes("a") && !board.includes("b")) return [Math.floor(N * N / 2)];
+  for (let i = 0; i < N * N; i++) {
+    if (board[i] !== ".") continue;
+    const r = Math.floor(i / N);
+    const c = i % N;
+    let near = false;
+    for (let dr = -radius; dr <= radius && !near; dr++) {
+      for (let dc = -radius; dc <= radius; dc++) {
+        const v = at(board, r + dr, c + dc);
+        if (v && v !== ".") {
+          near = true;
+          break;
+        }
+      }
+    }
+    if (near) out.push(i);
+  }
+  return out;
+}
+function bestMove(state, rand = Math.random) {
+  const me = state.turn;
+  const foe = other(me);
+  let best = -1;
+  let bestScore = -Infinity;
+  for (const i of candidates(state.board)) {
+    const mine = patternScore(state.board, i, me);
+    const theirs = patternScore(state.board, i, foe);
+    const score = (mine >= SCORE.five ? 1e9 : 0) + (theirs >= SCORE.five ? 5e8 : 0) + mine * 1.1 + theirs + rand() * 3;
+    if (score > bestScore) {
+      bestScore = score;
+      best = i;
+    }
+  }
+  return best;
+}
+
 // src/games/checkers.js
-var DIRS = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
+var DIRS2 = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
 var inside2 = (r, f) => r >= 0 && r < 8 && f >= 0 && f < 8;
 var isDark = (sq) => ((sq >> 3) + (sq & 7)) % 2 === 1;
 var colorOf2 = (p) => p ? p.toLowerCase() : null;
 var isKing = (p) => p === "W" || p === "B";
-function initState2() {
+function initState4() {
   const board = Array(64).fill(null);
   for (let sq = 0; sq < 64; sq++) {
     if (!isDark(sq)) continue;
@@ -269,7 +514,7 @@ function captureChains(board, origin, color, king, from, taken, path) {
   const empty2 = (sq) => sq === origin || !board[sq];
   const promoRow = color === "w" ? 0 : 7;
   const results = [];
-  for (const [dr, df] of DIRS) {
+  for (const [dr, df] of DIRS2) {
     if (!king) {
       const mr = r + dr;
       const mf = f + df;
@@ -320,7 +565,7 @@ function captureChains(board, origin, color, king, from, taken, path) {
   }
   return results;
 }
-function legalMoves2(state, color = state.turn) {
+function legalMoves3(state, color = state.turn) {
   const { board } = state;
   const captures = [];
   const quiet = [];
@@ -336,7 +581,7 @@ function legalMoves2(state, color = state.turn) {
     if (captures.length) continue;
     const r = sq >> 3;
     const f = sq & 7;
-    for (const [dr, df] of DIRS) {
+    for (const [dr, df] of DIRS2) {
       if (!king && dr !== forward) continue;
       let rr = r + dr;
       let ff = f + df;
@@ -361,18 +606,18 @@ function applyMove(state, move) {
   board[to] = piece;
   return { board, turn: state.turn === "w" ? "b" : "w", last: move.path, count: state.count + 1 };
 }
-function status2(state) {
-  const moves = legalMoves2(state);
+function status3(state) {
+  const moves = legalMoves3(state);
   if (moves.length === 0) return { over: true, winner: state.turn === "w" ? "b" : "w" };
   return { over: false, winner: null };
 }
 
 // src/games/nardi.js
-var other = (c) => c === "w" ? "b" : "w";
+var other2 = (c) => c === "w" ? "b" : "w";
 var sign = (c) => c === "w" ? 1 : -1;
 var own = (v, c) => v * sign(c) > 0;
 var count = (v, c) => own(v, c) ? Math.abs(v) : 0;
-function initState3() {
+function initState5() {
   const points = Array(24).fill(0);
   points[23] = 2;
   points[12] = 5;
@@ -449,7 +694,7 @@ function applySingle(s, m) {
   else {
     if (points[m.to] * sign(c) === -1) {
       points[m.to] = 0;
-      bar[other(c)]++;
+      bar[other2(c)]++;
       hit = true;
     }
     points[m.to] += sign(c);
@@ -474,7 +719,7 @@ function maxDepth(s, memo) {
   memo.set(k, best);
   return best;
 }
-function legalMoves3(s) {
+function legalMoves4(s) {
   if (s.phase !== "move" || !s.dice.length) return [];
   const memo = /* @__PURE__ */ new Map();
   const md = maxDepth(s, memo);
@@ -493,26 +738,26 @@ function legalMoves3(s) {
   return cands;
 }
 function endTurn(s) {
-  return { ...s, turn: other(s.turn), phase: "roll", dice: [] };
+  return { ...s, turn: other2(s.turn), phase: "roll", dice: [] };
 }
 function applyRoll(s, roll) {
   const [a, b] = roll;
   const dice = a === b ? [a, a, a, a] : [a, b];
   const next = { ...s, phase: "move", dice, rolled: [a, b], last: [], noMoves: false };
-  if (!legalMoves3(next).length) return { ...endTurn(next), rolled: [a, b], noMoves: true, passedBy: s.turn };
+  if (!legalMoves4(next).length) return { ...endTurn(next), rolled: [a, b], noMoves: true, passedBy: s.turn };
   return next;
 }
 function applyMove2(s, m) {
   let next = applySingle(s, m);
   if (next.off[s.turn] === 15) {
-    const loser = other(s.turn);
+    const loser = other2(s.turn);
     return { ...next, phase: "over", dice: [], winner: s.turn, score: next.off[loser] === 0 ? 2 : 1 };
   }
-  if (!next.dice.length || !legalMoves3(next).length) next = endTurn(next);
+  if (!next.dice.length || !legalMoves4(next).length) next = endTurn(next);
   return next;
 }
 function findMove(s, from, to) {
-  return legalMoves3(s).filter((m) => m.from === from && m.to === to).sort((x, y) => x.die - y.die)[0];
+  return legalMoves4(s).filter((m) => m.from === from && m.to === to).sort((x, y) => x.die - y.die)[0];
 }
 
 // src/games/domino.js
@@ -531,7 +776,7 @@ function fullSet() {
   for (let a = 0; a <= 6; a++) for (let b = a; b <= 6; b++) tiles.push([a, b]);
   return tiles;
 }
-function initState4(rand = Math.random) {
+function initState6(rand = Math.random) {
   const tiles = shuffle(fullSet(), rand);
   const hands = { a: tiles.slice(0, 7), b: tiles.slice(7, 14) };
   const boneyard = tiles.slice(14);
@@ -563,7 +808,7 @@ function finish(s) {
   }
   return { ...s, turn: otherSeat(seat) };
 }
-function play(s, i, side) {
+function play2(s, i, side) {
   const seat = s.turn;
   const hand = s.hands[seat].slice();
   const [tile] = hand.splice(i, 1);
@@ -608,16 +853,16 @@ function pass(s) {
 }
 var canDraw = (s) => !playable(s).length && s.boneyard.length > 0;
 var mustPass = (s) => !playable(s).length && s.boneyard.length === 0;
-var isOver = (s) => Boolean(s.winner || s.draw);
+var isOver2 = (s) => Boolean(s.winner || s.draw);
 
 // src/games/longnardi.js
-var other2 = (c) => c === "w" ? "b" : "w";
+var other3 = (c) => c === "w" ? "b" : "w";
 var sign2 = (c) => c === "w" ? 1 : -1;
 var count2 = (v, c) => v * sign2(c) > 0 ? Math.abs(v) : 0;
 var idx = (c, p) => c === "w" ? 23 - p : (35 - p) % 24;
 var pos = (c, i) => c === "w" ? 23 - i : (35 - i) % 24;
 var HEAD = { w: 23, b: 11 };
-function initState5() {
+function initState7() {
   const points = Array(24).fill(0);
   points[HEAD.w] = 15;
   points[HEAD.b] = -15;
@@ -646,7 +891,7 @@ function allHome2(s, c) {
   return true;
 }
 function illegalPrime(points, c) {
-  const o = other2(c);
+  const o = other3(c);
   let run = 0;
   let farthestOpp = -1;
   for (let q = 0; q < 24; q++) if (count2(points[idx(o, q)], o)) farthestOpp = q;
@@ -667,7 +912,7 @@ function singleMoves2(s, die) {
     const tp = p + die;
     if (tp <= 23) {
       const to = idx(c, tp);
-      if (!count2(s.points[to], other2(c))) moves.push({ from: i, to, die });
+      if (!count2(s.points[to], other3(c))) moves.push({ from: i, to, die });
     } else if (canBearOff) {
       let farther = false;
       if (tp > 24) {
@@ -709,7 +954,7 @@ function maxDepth2(s, memo) {
   memo.set(k, best);
   return best;
 }
-function legalMoves4(s) {
+function legalMoves5(s) {
   if (s.phase !== "move" || !s.dice.length) return [];
   const memo = /* @__PURE__ */ new Map();
   const md = maxDepth2(s, memo);
@@ -728,7 +973,7 @@ function legalMoves4(s) {
   return cands;
 }
 function endTurn2(s) {
-  return { ...s, turns: { ...s.turns, [s.turn]: s.turns[s.turn] + 1 }, turn: other2(s.turn), phase: "roll", dice: [] };
+  return { ...s, turns: { ...s.turns, [s.turn]: s.turns[s.turn] + 1 }, turn: other3(s.turn), phase: "roll", dice: [] };
 }
 function applyRoll2(s, roll) {
   const [a, b] = roll;
@@ -736,20 +981,20 @@ function applyRoll2(s, roll) {
   const first = s.turns[s.turn] === 0;
   const headLimit = first && a === b && [6, 4, 3].includes(a) ? 2 : 1;
   const next = { ...s, phase: "move", dice, rolled: [a, b], last: [], headTaken: 0, headLimit, noMoves: false };
-  if (!legalMoves4(next).length) return { ...endTurn2(next), rolled: [a, b], noMoves: true, passedBy: s.turn };
+  if (!legalMoves5(next).length) return { ...endTurn2(next), rolled: [a, b], noMoves: true, passedBy: s.turn };
   return next;
 }
 function applyMove3(s, m) {
   let next = applySingle2(s, m);
   if (next.off[s.turn] === 15) {
-    const loser = other2(s.turn);
+    const loser = other3(s.turn);
     return { ...next, phase: "over", dice: [], winner: s.turn, score: next.off[loser] === 0 ? 2 : 1 };
   }
-  if (!next.dice.length || !legalMoves4(next).length) next = endTurn2(next);
+  if (!next.dice.length || !legalMoves5(next).length) next = endTurn2(next);
   return next;
 }
 function findMove2(s, from, to) {
-  return legalMoves4(s).filter((m) => m.from === from && m.to === to).sort((x, y) => x.die - y.die)[0];
+  return legalMoves5(s).filter((m) => m.from === from && m.to === to).sort((x, y) => x.die - y.die)[0];
 }
 
 // src/games/cards.js
@@ -774,7 +1019,7 @@ function shuffle2(arr, rand = Math.random) {
 
 // src/games/durak.js
 var otherSeat2 = (s) => s === "a" ? "b" : "a";
-function initState6(rand = Math.random) {
+function initState8(rand = Math.random) {
   const deck = shuffle2(deck36(), rand);
   const hands = { a: deck.slice(0, 6), b: deck.slice(6, 12) };
   const stock = deck.slice(12);
@@ -890,7 +1135,7 @@ function done(s) {
   if (s.phase === "attack" && s.table.length && allBeaten(s)) return endBout(s, "beaten");
   throw new Error("\u10D0\u10EE\u10DA\u10D0 \u10D0\u10DB\u10D8\u10E1 \u10D2\u10D0\u10D9\u10D4\u10D7\u10D4\u10D1\u10D0 \u10D0\u10E0 \u10E8\u10D4\u10D8\u10EB\u10DA\u10D4\u10D1\u10D0");
 }
-var isOver2 = (s) => s.phase === "over";
+var isOver3 = (s) => s.phase === "over";
 
 // src/games/joker.js
 var SEATS = ["a", "b", "c", "d"];
@@ -905,7 +1150,7 @@ function jokerDeck() {
 }
 var zero = () => ({ a: 0, b: 0, c: 0, d: 0 });
 var empty = () => ({ a: null, b: null, c: null, d: null });
-function initState7(rand = Math.random, mode = "standard") {
+function initState9(rand = Math.random, mode = "standard") {
   const s = {
     mode: MODES[mode] ? mode : "standard",
     set: 0,
@@ -1053,7 +1298,7 @@ function scoreHand(s, rand) {
   next.dealer = nextSeat(s.dealer);
   return deal(next, rand);
 }
-function play2(s, card, opts = {}, rand = Math.random) {
+function play3(s, card, opts = {}, rand = Math.random) {
   if (s.phase !== "play") throw new Error("\u10D0\u10EE\u10DA\u10D0 \u10D9\u10D0\u10E0\u10E2\u10D8\u10E1 \u10D3\u10D0\u10D3\u10D4\u10D1\u10D0 \u10D0\u10E0 \u10E8\u10D4\u10D8\u10EB\u10DA\u10D4\u10D1\u10D0");
   const seat = s.turn;
   if (!legalCards(s, seat).includes(card)) throw new Error("\u10D0\u10DB \u10D9\u10D0\u10E0\u10E2\u10E1 \u10D5\u10D4\u10E0 \u10D3\u10D0\u10D3\u10D4\u10D1");
@@ -1095,7 +1340,7 @@ function checkBura(s, order) {
   }
   return s;
 }
-function initState8(rand = Math.random) {
+function initState10(rand = Math.random) {
   const deck = shuffle2(deck36(), rand);
   const leader = rand() < 0.5 ? "a" : "b";
   const stock = deck.slice(6);
@@ -1174,7 +1419,7 @@ function respond(s, cards) {
   }
   return { ...next, phase: "lead", leader: winner, turn: winner, trick: s.trick + 1 };
 }
-var isOver3 = (s) => s.phase === "over";
+var isOver4 = (s) => s.phase === "over";
 
 // src/games/loto.js
 var loto_exports = {};
@@ -1186,8 +1431,8 @@ __export(loto_exports, {
   coveredCount: () => coveredCount,
   draw: () => draw,
   due: () => due,
-  initState: () => initState9,
-  isOver: () => isOver4,
+  initState: () => initState11,
+  isOver: () => isOver5,
   makeTicket: () => makeTicket,
   numbersOf: () => numbersOf,
   rowsLeft: () => rowsLeft
@@ -1227,7 +1472,7 @@ var done2 = (ticket, set, mode) => {
   const left = rowsLeft(ticket, set);
   return mode === "full" ? left.every((n) => n === 0) : left.some((n) => n === 0);
 };
-function initState9(rand = Math.random, mode = "line", seats = 4) {
+function initState11(rand = Math.random, mode = "line", seats = 4) {
   const list = SEATS2.slice(0, seats);
   return {
     bag: shuffle2(Array.from({ length: 90 }, (_, i) => i + 1), rand),
@@ -1259,7 +1504,7 @@ function draw(s, now = Date.now()) {
   if (!winners.length) return next;
   return { ...next, phase: "over", next_at: null, winners, winner: winners.length === 1 ? winners[0] : null, draw: winners.length > 1 };
 }
-var isOver4 = (s) => s.phase === "over";
+var isOver5 = (s) => s.phase === "over";
 var NICK = { 1: "\u10D9\u10DD\u10DA\u10D8", 11: "\u10EF\u10DD\u10EE\u10D4\u10D1\u10D8", 22: "\u10D8\u10EE\u10D5\u10D4\u10D1\u10D8", 69: "\u10EC\u10D8\u10DC \u10D3\u10D0 \u10E3\u10D9\u10D0\u10DC", 77: "\u10EA\u10E3\u10DA\u10D4\u10D1\u10D8", 90: "\u10D1\u10D0\u10D1\u10E3\u10D0" };
 
 // src/games/index.js
@@ -1268,7 +1513,7 @@ var GAMES = {
     type: "nardi",
     title: "\u10DC\u10D0\u10E0\u10D3\u10D8",
     blurb: "\u10D9\u10D0\u10DB\u10D0\u10D7\u10D4\u10DA\u10D8, \u10EA\u10D4\u10DB\u10D0 \u10D3\u10D0 \u10DB\u10D0\u10E0\u10E1\u10D8",
-    init: () => initState3(),
+    init: () => initState5(),
     seatOf: (state) => state.turn === "w" ? "a" : "b"
   },
   chess: {
@@ -1278,25 +1523,39 @@ var GAMES = {
     init: () => initState(),
     seatOf: (state) => state.turn === "w" ? "a" : "b"
   },
+  chess960: {
+    type: "chess960",
+    title: "\u10ED\u10D0\u10D3\u10E0\u10D0\u10D9\u10D8 960",
+    blurb: "\u10E4\u10D8\u10D2\u10E3\u10E0\u10D4\u10D1\u10D8 \u10E8\u10D4\u10DB\u10D7\u10EE\u10D5\u10D4\u10D5\u10D8\u10D7 \u10E0\u10D8\u10D2\u10E8\u10D8 \u2014 \u10D7\u10D4\u10DD\u10E0\u10D8\u10D0 \u10D0\u10E6\u10D0\u10E0 \u10D2\u10D4\u10EE\u10DB\u10D0\u10E0\u10D4\u10D1\u10D0",
+    init: (rand = cryptoRand) => initState2(rand),
+    seatOf: (state) => state.turn === "w" ? "a" : "b"
+  },
+  gomoku: {
+    type: "gomoku",
+    title: "\u10EE\u10E3\u10D7\u10D8 \u10E0\u10D8\u10D2\u10E8\u10D8",
+    blurb: "15\xD715 \u10D3\u10D0\u10E4\u10D0 \u2014 \u10D0\u10D0\u10EC\u10E7\u10D5\u10D4 \u10EE\u10E3\u10D7\u10D8 \u10E5\u10D5\u10D0 \u10D4\u10E0\u10D7 \u10EE\u10D0\u10D6\u10D6\u10D4",
+    init: () => initState3(),
+    seatOf: (state) => state.turn
+  },
   checkers: {
     type: "checkers",
     title: "\u10E8\u10D0\u10E8\u10D9\u10D8",
     blurb: "\u10E0\u10E3\u10E1\u10E3\u10DA\u10D8 \u10EC\u10D4\u10E1\u10D4\u10D1\u10D8, \u10DB\u10DD\u10ED\u10E0\u10D0 \u10E1\u10D0\u10D5\u10D0\u10DA\u10D3\u10D4\u10D1\u10E3\u10DA\u10DD\u10D0",
-    init: () => initState2(),
+    init: () => initState4(),
     seatOf: (state) => state.turn === "w" ? "a" : "b"
   },
   domino: {
     type: "domino",
     title: "\u10D3\u10DD\u10DB\u10D8\u10DC\u10DD",
     blurb: "\u10D1\u10D0\u10D6\u10E0\u10D8\u10D7, \u10DD\u10E0\u10D8 \u10DB\u10DD\u10D7\u10D0\u10DB\u10D0\u10E8\u10D4",
-    init: () => initState4(cryptoRand),
+    init: () => initState6(cryptoRand),
     seatOf: (state) => state.turn
   },
   longnardi: {
     type: "longnardi",
     title: "\u10D2\u10E0\u10EB\u10D4\u10DA\u10D8 \u10DC\u10D0\u10E0\u10D3\u10D8",
     blurb: "\u10EA\u10D4\u10DB\u10D8\u10E1 \u10D2\u10D0\u10E0\u10D4\u10E8\u10D4, \u10D4\u10E0\u10D7\u10D8 \u10DB\u10D8\u10DB\u10D0\u10E0\u10D7\u10E3\u10DA\u10D4\u10D1\u10D8\u10D7",
-    init: () => initState5(),
+    init: () => initState7(),
     seatOf: (state) => state.turn === "w" ? "a" : "b"
   },
   durak: {
@@ -1304,7 +1563,7 @@ var GAMES = {
     title: "\u10D3\u10E3\u10E0\u10D0\u10D9\u10D8",
     blurb: "\u10E9\u10D0\u10DB\u10D0\u10E2\u10D4\u10D1\u10D8\u10D7\u10D8, 36 \u10D9\u10D0\u10E0\u10E2\u10D8",
     hidden: true,
-    init: (rand = cryptoRand) => initState6(rand),
+    init: (rand = cryptoRand) => initState8(rand),
     seatOf: (state) => state.turn
   },
   joker: {
@@ -1316,7 +1575,7 @@ var GAMES = {
     modes: MODES,
     defaultMode: "quick",
     modeNote: (k) => totalHands(k),
-    init: (rand = cryptoRand, opts = {}) => initState7(rand, opts.mode),
+    init: (rand = cryptoRand, opts = {}) => initState9(rand, opts.mode),
     seatOf: (state) => state.turn
   },
   bura: {
@@ -1324,7 +1583,7 @@ var GAMES = {
     title: "\u10D1\u10E3\u10E0\u10D0",
     blurb: "\u10E1\u10D0\u10DB\u10D8 \u10D9\u10D0\u10E0\u10E2\u10D8, \u10D9\u10DD\u10D6\u10D8\u10E0\u10D8 \u10D3\u10D0 61 \u10E5\u10E3\u10DA\u10D0",
     hidden: true,
-    init: (rand = cryptoRand) => initState8(rand),
+    init: (rand = cryptoRand) => initState10(rand),
     seatOf: (state) => state.turn
   },
   loto: {
@@ -1336,13 +1595,13 @@ var GAMES = {
     defaultMode: "line",
     modeNote: (k) => MODES2[k].sub,
     turnless: true,
-    init: (rand = cryptoRand, opts = {}) => initState9(rand, opts.mode),
+    init: (rand = cryptoRand, opts = {}) => initState11(rand, opts.mode),
     seatOf: () => null
   }
 };
 var seatsOf = (type) => GAMES[type]?.seats || 2;
 var SEAT_LETTERS = ["a", "b", "c", "d"];
-var GAME_LIST = ["nardi", "longnardi", "joker", "bura", "durak", "loto", "chess", "checkers", "domino"].map((k) => GAMES[k]);
+var GAME_LIST = ["nardi", "longnardi", "joker", "bura", "durak", "loto", "chess", "chess960", "checkers", "gomoku", "domino"].map((k) => GAMES[k]);
 function cryptoRand() {
   const a = new Uint32Array(1);
   globalThis.crypto.getRandomValues(a);
@@ -1355,8 +1614,17 @@ function outcome(type, state) {
     if (!st.over) return { over: false, check: st.check };
     return { over: true, winner: st.winner ? st.winner === "w" ? "a" : "b" : null, result: st.result };
   }
+  if (type === "chess960") {
+    const st = status2(fromFEN(state.fen));
+    if (!st.over) return { over: false, check: st.check };
+    return { over: true, winner: st.winner ? st.winner === "w" ? "a" : "b" : null, result: st.result };
+  }
+  if (type === "gomoku") {
+    if (!isOver(state)) return { over: false };
+    return { over: true, winner: state.winner || null, result: state.winner ? "five" : "gomokudraw" };
+  }
   if (type === "checkers") {
-    const st = status2(state);
+    const st = status3(state);
     return st.over ? { over: true, winner: st.winner === "w" ? "a" : "b", result: "nomoves" } : { over: false };
   }
   if (type === "nardi" || type === "longnardi") {
@@ -1364,7 +1632,7 @@ function outcome(type, state) {
     return { over: true, winner: state.winner === "w" ? "a" : "b", result: state.score === 2 ? "mars" : "win" };
   }
   if (type === "domino") {
-    if (!isOver(state)) return { over: false };
+    if (!isOver2(state)) return { over: false };
     return { over: true, winner: state.winner || null, result: state.blocked ? "blocked" : "domino" };
   }
   if (type === "durak") {
@@ -1398,11 +1666,12 @@ var IllegalMove = class extends Error {
 };
 var same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 function initFor(type, rand = cryptoRand, opts = {}) {
-  if (type === "domino") return initState4(rand);
-  if (type === "durak") return initState6(rand);
-  if (type === "joker") return initState7(rand, opts.mode);
-  if (type === "bura") return initState8(rand);
-  if (type === "loto") return initState9(rand, opts.mode);
+  if (type === "chess960") return initState2(rand);
+  if (type === "domino") return initState6(rand);
+  if (type === "durak") return initState8(rand);
+  if (type === "joker") return initState9(rand, opts.mode);
+  if (type === "bura") return initState10(rand);
+  if (type === "loto") return initState11(rand, opts.mode);
   if (!GAMES[type]) throw new IllegalMove("\u10E3\u10EA\u10DC\u10DD\u10D1\u10D8 \u10D7\u10D0\u10DB\u10D0\u10E8\u10D8");
   return GAMES[type].init();
 }
@@ -1422,9 +1691,19 @@ function applyAction(type, state, action, rand = cryptoRand) {
       if (!m) throw new IllegalMove();
       return applyToState(state, m);
     }
+    case "chess960": {
+      const s = fromFEN(state.fen);
+      const m = legalMoves2(s).find((x) => x.from === action.from && x.to === action.to && (x.promo || null) === (action.promo || null));
+      if (!m) throw new IllegalMove();
+      return applyToState2(state, m);
+    }
+    case "gomoku": {
+      if (!Number.isInteger(action.at)) throw new IllegalMove();
+      return guard(() => play(state, action.at));
+    }
     case "checkers": {
       if (!Array.isArray(action.path)) throw new IllegalMove();
-      const m = legalMoves2(state).find((x) => same(x.path, action.path));
+      const m = legalMoves3(state).find((x) => same(x.path, action.path));
       if (!m) throw new IllegalMove();
       return applyMove(state, m);
     }
@@ -1450,7 +1729,7 @@ function applyAction(type, state, action, rand = cryptoRand) {
       const [x, y] = action.play;
       const i = state.hands[state.turn].findIndex((t) => t[0] === x && t[1] === y);
       if (i < 0 || !playable(state).some((o) => o.i === i && o.side === action.side)) throw new IllegalMove();
-      return play(state, i, action.side);
+      return play2(state, i, action.side);
     }
     case "longnardi": {
       if (action.roll) {
@@ -1471,7 +1750,7 @@ function applyAction(type, state, action, rand = cryptoRand) {
     case "joker": {
       if ("trump" in action) return guard(() => chooseTrump(state, action.trump ?? null));
       if (typeof action.bid === "number") return guard(() => bid(state, action.bid));
-      if (typeof action.play === "string") return guard(() => play2(state, action.play, { mode: action.mode, suit: action.suit }, rand));
+      if (typeof action.play === "string") return guard(() => play3(state, action.play, { mode: action.mode, suit: action.suit }, rand));
       throw new IllegalMove();
     }
     case "bura": {
@@ -1487,7 +1766,7 @@ var mask = (list) => list.map(() => null);
 function publicState(type, state) {
   if (!HIDDEN.has(type)) return state;
   if (type === "domino") {
-    const over = isOver(state);
+    const over = isOver2(state);
     return {
       ...state,
       hands: over ? state.hands : { a: mask(state.hands.a), b: mask(state.hands.b) },
@@ -1495,11 +1774,11 @@ function publicState(type, state) {
     };
   }
   if (type === "durak") {
-    const over = isOver2(state);
+    const over = isOver3(state);
     return { ...state, hands: over ? state.hands : { a: mask(state.hands.a), b: mask(state.hands.b) }, stock: mask(state.stock) };
   }
   if (type === "bura") {
-    const over = isOver3(state);
+    const over = isOver4(state);
     return { ...state, hands: over ? state.hands : { a: mask(state.hands.a), b: mask(state.hands.b) }, stock: mask(state.stock) };
   }
   const hands = {};
@@ -1525,20 +1804,26 @@ function material(s, color) {
   });
   return v;
 }
-function chessBot(state) {
+var CHESS_RULES = { legalMoves, makeMove, applyToState };
+var C960_RULES = {
+  legalMoves: (s) => legalMoves2(s).filter((m) => !(m.flag === "castle960" && m.to !== m.rook)),
+  makeMove: makeMove2,
+  applyToState: applyToState2
+};
+function chessLike(state, R) {
   const s = fromFEN(state.fen);
   const me = s.turn;
   let best = null;
   let bestScore = -Infinity;
-  for (const m of legalMoves(s)) {
+  for (const m of R.legalMoves(s)) {
     if (m.promo && m.promo !== "q") continue;
-    const n = makeMove(s, m);
-    const replies = legalMoves(n);
+    const n = R.makeMove(s, m);
+    const replies = R.legalMoves(n);
     let score;
     if (!replies.length) score = inCheck(n) ? 1e6 : -50;
     else {
       score = Infinity;
-      for (const r of replies) score = Math.min(score, material(makeMove(n, r), me));
+      for (const r of replies) score = Math.min(score, material(R.makeMove(n, r), me));
       if (inCheck(n)) score += 15;
     }
     score += cryptoRand() * 10;
@@ -1547,7 +1832,13 @@ function chessBot(state) {
       best = m;
     }
   }
-  return best ? applyToState(state, best) : state;
+  return best ? R.applyToState(state, best) : state;
+}
+var chessBot = (state) => chessLike(state, CHESS_RULES);
+var chess960Bot = (state) => chessLike(state, C960_RULES);
+function gomokuBot(state, rand = cryptoRand) {
+  const i = bestMove(state, rand);
+  return i >= 0 ? play(state, i) : state;
 }
 function ckEval(s, color) {
   let v = 0;
@@ -1562,9 +1853,9 @@ function checkersBot(state) {
   const me = state.turn;
   let best = null;
   let bestScore = -Infinity;
-  for (const m of legalMoves2(state)) {
+  for (const m of legalMoves3(state)) {
     const n = applyMove(state, m);
-    const replies = legalMoves2(n);
+    const replies = legalMoves3(n);
     let score;
     if (!replies.length) score = 1e6;
     else {
@@ -1604,7 +1895,7 @@ function nardiBot(state) {
   if (s.phase === "roll") s = applyRoll(s, rollDice(cryptoRand));
   let guard2 = 0;
   while (s.turn === seat && s.phase === "move" && guard2++ < 8) {
-    const moves = legalMoves3(s);
+    const moves = legalMoves4(s);
     if (!moves.length) break;
     let best = moves[0];
     let bestScore = -Infinity;
@@ -1623,7 +1914,7 @@ function dominoBot(state) {
   let s = state;
   const seat = s.turn;
   let guard2 = 0;
-  while (s.turn === seat && !isOver(s) && guard2++ < 30) {
+  while (s.turn === seat && !isOver2(s) && guard2++ < 30) {
     const options = playable(s);
     if (options.length) {
       let best = options[0];
@@ -1636,7 +1927,7 @@ function dominoBot(state) {
           best = o;
         }
       }
-      s = play(s, best.i, best.side);
+      s = play2(s, best.i, best.side);
     } else if (canDraw(s)) s = drawTile(s);
     else s = pass(s);
   }
@@ -1663,7 +1954,7 @@ function longnardiBot(state) {
   if (s.phase === "roll") s = applyRoll2(s, rollDice2(cryptoRand));
   let guard2 = 0;
   while (s.turn === seat && s.phase === "move" && guard2++ < 8) {
-    const moves = legalMoves4(s);
+    const moves = legalMoves5(s);
     if (!moves.length) break;
     let best = moves[0];
     let bestScore = -Infinity;
@@ -1754,30 +2045,30 @@ function jokerBot(s, rand = cryptoRand) {
   if (!s.trick.length) {
     if (wantWin) {
       const ace = regular.filter((c) => rankOf(c) === 14 && suitOf(c) !== ts)[0];
-      if (ace) return play2(s, ace, {}, rand);
+      if (ace) return play3(s, ace, {}, rand);
       const topTrump = regular.filter((c) => suitOf(c) === ts).pop();
-      if (topTrump && rankOf(topTrump) >= 13) return play2(s, topTrump, {}, rand);
+      if (topTrump && rankOf(topTrump) >= 13) return play3(s, topTrump, {}, rand);
       if (jk) {
         const suit = ts || SUITS.find((x) => !s.hands[me].some((c) => suitOf(c) === x)) || "s";
-        return play2(s, jk, { mode: "high", suit }, rand);
+        return play3(s, jk, { mode: "high", suit }, rand);
       }
-      return play2(s, regular[regular.length - 1], {}, rand);
+      return play3(s, regular[regular.length - 1], {}, rand);
     }
     const low = regular.filter((c) => suitOf(c) !== ts)[0] || regular[0];
-    if (low) return play2(s, low, {}, rand);
-    return play2(s, jk, { mode: "low", suit: SUITS[Math.floor(rand() * 4)] }, rand);
+    if (low) return play3(s, low, {}, rand);
+    return play3(s, jk, { mode: "low", suit: SUITS[Math.floor(rand() * 4)] }, rand);
   }
   const wins = (card, mode) => trickWinner([...s.trick, { seat: me, card, mode }], ts) === s.trick.length;
   if (wantWin) {
     const winner = regular.find((c) => wins(c));
-    if (winner) return play2(s, winner, {}, rand);
-    if (jk) return play2(s, jk, { mode: "high" }, rand);
-    return play2(s, regular[0], {}, rand);
+    if (winner) return play3(s, winner, {}, rand);
+    if (jk) return play3(s, jk, { mode: "high" }, rand);
+    return play3(s, regular[0], {}, rand);
   }
   const losers = regular.filter((c) => !wins(c));
-  if (losers.length) return play2(s, losers[losers.length - 1], {}, rand);
-  if (jk) return play2(s, jk, { mode: "low" }, rand);
-  return play2(s, regular[0], {}, rand);
+  if (losers.length) return play3(s, losers[losers.length - 1], {}, rand);
+  if (jk) return play3(s, jk, { mode: "low" }, rand);
+  return play3(s, regular[0], {}, rand);
 }
 function combos(arr, k) {
   if (k === 0) return [[]];
@@ -1824,6 +2115,8 @@ function buraBot(s) {
 }
 var BOTS = {
   chess: chessBot,
+  chess960: chess960Bot,
+  gomoku: gomokuBot,
   checkers: checkersBot,
   nardi: nardiBot,
   domino: dominoBot,
@@ -1836,13 +2129,13 @@ var BOTS = {
 
 // supabase/functions-src/game-core.js
 var HttpError = class extends Error {
-  constructor(status3, message) {
+  constructor(status4, message) {
     super(message);
-    this.status = status3;
+    this.status = status4;
   }
 };
 var TIME_CONTROLS = { "1+0": [1, 0], "3+0": [3, 0], "3+2": [3, 2], "5+0": [5, 0], "10+0": [10, 0] };
-var CLOCK_GAMES = /* @__PURE__ */ new Set(["chess", "checkers"]);
+var CLOCK_GAMES = /* @__PURE__ */ new Set(["chess", "chess960", "checkers"]);
 var ABORT_AFTER = 6e4;
 var seatsIn = (g) => SEAT_LETTERS.slice(0, g.seats || 2);
 var playerAt = (g, seat) => g[`player_${seat}`] ?? null;
@@ -2105,7 +2398,7 @@ async function handle(body, { userId, db: db2, rand = cryptoRand, now = Date.now
   }
   async function finishOnTime(g, loserSeat) {
     const winSeat = loserSeat === "a" ? "b" : "a";
-    if (g.type === "chess") {
+    if (g.type === "chess" || g.type === "chess960") {
       const color = winSeat === "a" ? "w" : "b";
       const pieces = chess_exports.fromFEN(g.state.fen).board.filter((p) => p && chess_exports.colorOf(p) === color);
       if (pieces.length === 1) {
@@ -2123,7 +2416,7 @@ var cors = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 };
-var json = (data, status3 = 200) => new Response(JSON.stringify(data), { status: status3, headers: { ...cors, "Content-Type": "application/json" } });
+var json = (data, status4 = 200) => new Response(JSON.stringify(data), { status: status4, headers: { ...cors, "Content-Type": "application/json" } });
 function serviceKey() {
   try {
     const keys = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") ?? "{}");
@@ -2217,8 +2510,8 @@ Deno.serve(async (req) => {
     const body = await req.json();
     return json(await handle(body, { userId: data.user.id, db }));
   } catch (e) {
-    const status3 = e.status ?? 500;
-    if (status3 === 500) console.error(e);
-    return json({ error: e.message }, status3);
+    const status4 = e.status ?? 500;
+    if (status4 === 500) console.error(e);
+    return json({ error: e.message }, status4);
   }
 });

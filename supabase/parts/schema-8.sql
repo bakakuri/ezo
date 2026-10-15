@@ -1,4 +1,344 @@
--- ეზო — სქემის ნაწილი 8/8. გაუშვი 7-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
+-- ეზო — სქემის ნაწილი 8/9. გაუშვი 7-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
+
+-- ---- ადმინის ანალიტიკა: დღიური რიგები და შეჯამება (თბილისის დროით)
+create or replace function public.admin_analytics(p_days int default 30)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare
+  n int := greatest(7, least(coalesce(p_days, 30), 180));
+  today date := (now() at time zone 'Asia/Tbilisi')::date;
+  since date;
+  t0 timestamptz;   -- პერიოდის დასაწყისი (თბილისის შუაღამე)
+  tp timestamptz;   -- წინა პერიოდის დასაწყისი
+  r jsonb;
+begin
+  if not exists (select 1 from profiles where id = auth.uid() and role = 'admin') then raise exception 'forbidden'; end if;
+  since := today - (n - 1);
+  t0 := since::timestamp at time zone 'Asia/Tbilisi';
+  tp := (since - n)::timestamp at time zone 'Asia/Tbilisi';
+  with d as (select generate_series(since, today, interval '1 day')::date as day),
+  su as (select (created_at at time zone 'Asia/Tbilisi')::date as day, count(*) as n from profiles where created_at >= t0 group by 1),
+  ac as (select day, count(*) as n from daily_active where day >= since group by 1),
+  po as (select (created_at at time zone 'Asia/Tbilisi')::date as day, count(*) filter (where parent_id is null) as n,
+                count(*) filter (where parent_id is not null) as r from posts where created_at >= t0 group by 1),
+  me as (select (created_at at time zone 'Asia/Tbilisi')::date as day, count(*) as n from messages where created_at >= t0 group by 1),
+  ga as (select (updated_at at time zone 'Asia/Tbilisi')::date as day, count(*) as n from games where status = 'finished' and updated_at >= t0 group by 1)
+  select jsonb_agg(jsonb_build_object('day', d.day, 'signups', coalesce(su.n, 0), 'active', coalesce(ac.n, 0),
+           'posts', coalesce(po.n, 0), 'replies', coalesce(po.r, 0), 'messages', coalesce(me.n, 0), 'games', coalesce(ga.n, 0)) order by d.day)
+    into r
+    from d left join su using (day) left join ac using (day) left join po using (day) left join me using (day) left join ga using (day);
+  return jsonb_build_object(
+    'days', r,
+    'totals', jsonb_build_object(
+      'users', (select count(*) from profiles where onboarded),
+      'dau', (select count(*) from daily_active where day = today),
+      'wau', (select count(distinct user_id) from daily_active where day > today - 7),
+      'mau', (select count(distinct user_id) from daily_active where day > today - 30),
+      'signups', (select count(*) from profiles where created_at >= t0),
+      'signups_prev', (select count(*) from profiles where created_at >= tp and created_at < t0),
+      'posts', (select count(*) from posts where parent_id is null and created_at >= t0),
+      'posts_prev', (select count(*) from posts where parent_id is null and created_at >= tp and created_at < t0),
+      -- 7 დღის დაბრუნება: 8–14 დღის წინ დარეგისტრირებულებიდან რამდენი შემოვიდა ბოლო 7 დღეში
+      'retention_7d', (select case when count(*) = 0 then null else round(100.0 * count(*) filter (where exists (
+                          select 1 from daily_active a where a.user_id = p.id and a.day > today - 7)) / count(*)) end
+                       from profiles p where (p.created_at at time zone 'Asia/Tbilisi')::date between today - 14 and today - 8)));
+end $$;
+
+-- =====================================================================
+-- ეტაპი E: დაბადების და სახელობის დღეები, @მოხსენიება, რედაქტირება, ბმულის ბარათები, მოგონებები
+-- =====================================================================
+
+-- ---- დაბადების დღე: მხოლოდ თვე და დღე (წელი არ ინახება), ცალკე ცხრილში — სხვები პირდაპირ ვერ კითხულობენ,
+-- მხოლოდ celebrations_today აჩვენებს მეგობრებს დღესვე (თუ visible)
+create table if not exists public.birthdays (
+  user_id uuid primary key default auth.uid() references public.profiles on delete cascade,
+  month smallint not null check (month between 1 and 12),
+  day smallint not null check (day between 1 and 31),
+  visible boolean not null default true,
+  check (day <= case month when 2 then 29 when 4 then 30 when 6 then 30 when 9 then 30 when 11 then 30 else 31 end)
+);
+alter table public.birthdays enable row level security;
+drop policy if exists "own birthday" on public.birthdays;
+create policy "own birthday" on public.birthdays for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+grant select, insert, update, delete on public.birthdays to authenticated;
+
+-- ---- სახელობის დღეები (ახალი სტილით). name — სახელის „ჩონჩხი“ (ka_skeleton), რომ ლათინურად დაწერილიც დაემთხვეს.
+-- სია შეგიძლია შეავსო: insert into public.name_days (name, month, day, feast) values (public.ka_skeleton('სახელი'), თვე, დღე, 'დღესასწაული');
+create table if not exists public.name_days (
+  name text not null,
+  month smallint not null check (month between 1 and 12),
+  day smallint not null check (day between 1 and 31),
+  feast text not null,
+  primary key (name, month, day)
+);
+alter table public.name_days enable row level security;
+drop policy if exists "name days read" on public.name_days;
+create policy "name days read" on public.name_days for select to authenticated using (true);
+grant select on public.name_days to authenticated;
+
+insert into public.name_days (name, month, day, feast)
+select public.ka_skeleton(n), m, d, f from (values
+  ('გიორგი', 11, 23, 'გიორგობა'), ('გიო', 11, 23, 'გიორგობა'), ('გოგი', 11, 23, 'გიორგობა'), ('გოგა', 11, 23, 'გიორგობა'),
+  ('გიორგი', 5, 6, 'გაზაფხულის გიორგობა'), ('გიო', 5, 6, 'გაზაფხულის გიორგობა'), ('გოგი', 5, 6, 'გაზაფხულის გიორგობა'), ('გოგა', 5, 6, 'გაზაფხულის გიორგობა'),
+  ('მარიამ', 8, 28, 'მარიამობა'), ('მარიამი', 8, 28, 'მარიამობა'), ('მარი', 8, 28, 'მარიამობა'),
+  ('ნინო', 1, 27, 'ნინოობა'),
+  ('ანდრია', 5, 12, 'ანდრიაობა'),
+  ('ნიკოლოზ', 12, 19, 'ნიკოლოზობა'), ('ნიკოლოზი', 12, 19, 'ნიკოლოზობა'), ('ნიკა', 12, 19, 'ნიკოლოზობა'), ('ნიკო', 12, 19, 'ნიკოლოზობა'),
+  ('ბარბარე', 12, 17, 'ბარბარობა'),
+  ('ეკატერინე', 12, 7, 'ეკატერინობა'), ('ეკა', 12, 7, 'ეკატერინობა'),
+  ('მიხეილ', 11, 21, 'მთავარანგელოზობა'), ('მიხეილი', 11, 21, 'მთავარანგელოზობა'), ('მიშა', 11, 21, 'მთავარანგელოზობა'), ('მიხო', 11, 21, 'მთავარანგელოზობა'),
+  ('გაბრიელ', 11, 21, 'მთავარანგელოზობა'), ('გაბრიელი', 11, 21, 'მთავარანგელოზობა'), ('გაბო', 11, 21, 'მთავარანგელოზობა'),
+  ('იოანე', 7, 7, 'ივანობა'), ('ივანე', 7, 7, 'ივანობა'), ('ვანო', 7, 7, 'ივანობა'),
+  ('პეტრე', 7, 12, 'პეტრე-პავლობა'), ('პავლე', 7, 12, 'პეტრე-პავლობა'),
+  ('ელენე', 6, 3, 'კონსტანტინე და ელენე'), ('კონსტანტინე', 6, 3, 'კონსტანტინე და ელენე'), ('კოტე', 6, 3, 'კონსტანტინე და ელენე'),
+  ('ილია', 8, 2, 'ილიაობა'),
+  ('სოფიო', 9, 30, 'სოფიოობა'), ('სოფო', 9, 30, 'სოფიოობა'), ('სოფია', 9, 30, 'სოფიოობა'),
+  ('თამარ', 5, 14, 'თამარობა'), ('თამარი', 5, 14, 'თამარობა'), ('თამუნა', 5, 14, 'თამარობა'),
+  ('ქეთევან', 9, 26, 'ქეთევანობა'), ('ქეთევანი', 9, 26, 'ქეთევანობა'), ('ქეთი', 9, 26, 'ქეთევანობა'), ('ქეთო', 9, 26, 'ქეთევანობა'),
+  ('ვახტანგ', 12, 13, 'ვახტანგობა'), ('ვახტანგი', 12, 13, 'ვახტანგობა'), ('ვახო', 12, 13, 'ვახტანგობა'),
+  ('ლუკა', 10, 31, 'ლუკაობა'), ('მათე', 11, 29, 'მათეობა'), ('თომა', 10, 19, 'თომაობა'),
+  ('დიმიტრი', 11, 8, 'დიმიტრობა'), ('თეკლა', 10, 7, 'თეკლაობა'),
+  ('ალექსანდრე', 12, 6, 'ალექსანდრობა'), ('სანდრო', 12, 6, 'ალექსანდრობა'), ('ალეკო', 12, 6, 'ალექსანდრობა')
+) as v(n, m, d, f)
+on conflict do nothing;
+
+-- დღეს: დაბადების დღეები და სახელობის დღეები ჩემს წრეში (ვისაც ვიწერ ან ვინც მიწერს), თბილისის დროით
+create or replace function public.celebrations_today()
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare
+  me uuid := auth.uid();
+  today date := (now() at time zone 'Asia/Tbilisi')::date;
+  m int := extract(month from (now() at time zone 'Asia/Tbilisi'))::int;
+  d int := extract(day from (now() at time zone 'Asia/Tbilisi'))::int;
+  -- 29 თებერვალს დაბადებულები ნაკიან წელს 28-ში
+  leap_fix boolean := (m = 2 and d = 28 and extract(day from (date_trunc('month', today) + interval '1 month - 1 day'))::int = 28);
+begin
+  if me is null then return null; end if;
+  return jsonb_build_object(
+    'date', today,
+    'birthdays', coalesce((
+      select jsonb_agg(jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url,
+                                          'verified', p.verified, 'last_seen', p.last_seen) order by p.full_name)
+      from profiles p join birthdays b on b.user_id = p.id
+      where p.id <> me and p.onboarded and b.visible and (p.banned_until is null or p.banned_until < now())
+        and b.month = m and (b.day = d or (leap_fix and b.day = 29))
+        and (exists (select 1 from follows where follower_id = me and following_id = p.id)
+             or exists (select 1 from follows where follower_id = p.id and following_id = me))
+        and not public.is_blocked(me, p.id)), '[]'::jsonb),
+    'namedays', coalesce((
+      select jsonb_agg(jsonb_build_object('feast', x.feast, 'people', x.people) order by x.feast)
+      from (
+        select nd.feast, jsonb_agg(distinct jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name,
+                 'avatar_url', p.avatar_url, 'verified', p.verified, 'last_seen', p.last_seen)) as people
+        from name_days nd
+        join profiles p on public.ka_skeleton(split_part(btrim(p.full_name), ' ', 1)) = nd.name
+        where nd.month = m and nd.day = d and p.id <> me and p.onboarded and (p.banned_until is null or p.banned_until < now())
+          and (exists (select 1 from follows where follower_id = me and following_id = p.id)
+               or exists (select 1 from follows where follower_id = p.id and following_id = me))
+          and not public.is_blocked(me, p.id)
+        group by nd.feast) x), '[]'::jsonb),
+    'feasts', coalesce((select jsonb_agg(distinct feast) from name_days where month = m and day = d), '[]'::jsonb),
+    'mine', jsonb_build_object(
+      'birthday', exists (select 1 from birthdays b where b.user_id = me and b.month = m and (b.day = d or (leap_fix and b.day = 29))),
+      'nameday', (select nd.feast from name_days nd join profiles p on p.id = me
+                  where nd.month = m and nd.day = d and public.ka_skeleton(split_part(btrim(p.full_name), ' ', 1)) = nd.name limit 1)));
+end $$;
+
+-- ---- @მოხსენიება: შეტყობინება იმას, ვინც პოსტს ხედავს (მაქსიმუმ 10 ერთ პოსტში; რედაქტირებისას — მხოლოდ ახლებს)
+alter table public.notifications drop constraint if exists notifications_type_check;
+alter table public.notifications add constraint notifications_type_check check (type in (
+  'like', 'reply', 'follow', 'gift', 'match', 'game_invite', 'quote',
+  'group_request', 'group_approved', 'event_rsvp', 'tournament_start', 'tournament_end',
+  'follow_request', 'follow_accept', 'listing_price', 'achievement', 'level_up', 'invite_joined', 'mention', 'season_end'));
+
+create or replace function public.extract_mentions(t text)
+returns text[] language sql immutable as $$
+  select coalesce(array_agg(distinct rtrim(lower(m[2]), '.')), '{}')
+  from regexp_matches(coalesce(t, ''), '(^|[^A-Za-z0-9_.@])@([A-Za-z0-9_.]{3,24})', 'g') as m;
+$$;
+
+create or replace function public.on_post_mentions()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_new text[]; v_old text[] := '{}'; v_user record; v_private boolean;
+begin
+  v_new := public.extract_mentions(new.body);
+  if tg_op = 'UPDATE' then v_old := public.extract_mentions(old.body); end if;
+  if cardinality(v_new) = 0 or new.hidden then return null; end if;
+  select is_private into v_private from profiles where id = new.author_id;
+  for v_user in
+    select p.id from profiles p
+    where p.username = any (v_new) and not (p.username = any (v_old)) and p.id <> new.author_id and p.onboarded
+      -- ხედავს თუ არა მოხსენიებული ამ პოსტს
+      and (not coalesce(v_private, false) or exists (select 1 from follows f where f.follower_id = p.id and f.following_id = new.author_id))
+      and (new.group_id is null or exists (select 1 from groups g where g.id = new.group_id and g.privacy = 'public')
+           or exists (select 1 from group_members gm where gm.group_id = new.group_id and gm.user_id = p.id and gm.status = 'active'))
+    limit 10
+  loop
+    perform public.notify(v_user.id, new.author_id, 'mention', new.id);
+  end loop;
+  return null;
+end $$;
+drop trigger if exists posts_mentions on public.posts;
+create trigger posts_mentions after insert or update of body on public.posts
+  for each row execute function public.on_post_mentions();
+revoke execute on function public.on_post_mentions() from public, anon, authenticated;
+
+-- მოხსენიების Push „პასუხების“ კატეგორიაშია; Push-ის ტექსტები და კატეგორიები — ეტაპი H-ში (push_category, on_notification_push)
+
+-- ---- ბმულის ბარათი: { url, title, description, image, site } — ავტორი ამატებს გამოქვეყნებისას (api/unfurl.js)
+alter table public.posts add column if not exists link jsonb;
+alter table public.posts drop constraint if exists posts_link_check;
+alter table public.posts add constraint posts_link_check check (
+  link is null or (jsonb_typeof(link) = 'object' and link ->> 'url' ~ '^https?://' and char_length(link::text) <= 2000
+                   and coalesce(link ->> 'image', 'https://') ~ '^https://'));
+
+-- ---- რედაქტირება: ტექსტის შესწორება გამოქვეყნებიდან 15 წუთის განმავლობაში („შესწორებულია“ — edited_at)
+create or replace function public.posts_edit_window()
+returns trigger language plpgsql as $$
+begin
+  if current_user in ('authenticated', 'anon') and (new.body is distinct from old.body or new.link is distinct from old.link)
+     and old.created_at < now() - interval '15 minutes' then
+    raise exception 'პოსტის შესწორება მხოლოდ გამოქვეყნებიდან 15 წუთის განმავლობაშია შესაძლებელი';
+  end if;
+  return new;
+end $$;
+drop trigger if exists posts_edit_window on public.posts;
+create trigger posts_edit_window before update of body, link on public.posts
+  for each row execute function public.posts_edit_window();
+
+-- ---- „ამ დღეს“: ჩემი პოსტები იგივე დღეს წინა წლებში (თბილისის დროით)
+create or replace function public.my_memories()
+returns setof public.posts language sql stable security invoker set search_path = public as $$
+  select p.* from posts p
+  where p.author_id = auth.uid() and p.parent_id is null and not p.hidden
+    and extract(month from (p.created_at at time zone 'Asia/Tbilisi')) = extract(month from (now() at time zone 'Asia/Tbilisi'))
+    and extract(day from (p.created_at at time zone 'Asia/Tbilisi')) = extract(day from (now() at time zone 'Asia/Tbilisi'))
+    and (p.created_at at time zone 'Asia/Tbilisi')::date < date_trunc('year', now() at time zone 'Asia/Tbilisi')::date
+  order by p.created_at desc
+  limit 3;
+$$;
+
+-- =====================================================================
+-- ეტაპი G: „გაღვიძება“ და საცავის დასუფთავება
+-- =====================================================================
+
+-- ---- გაღვიძება: Supabase-ის უფასო პროექტი 7 დღის უმოქმედობის შემდეგ ჩერდება.
+-- Vercel-ის ყოველდღიური cron (api/daily.js) ამას იძახებს — ერთი მარტივი მოთხოვნა ბაზაში საკმარისია.
+create or replace function public.keep_alive()
+returns timestamptz language sql stable as $$ select now() $$;
+grant execute on function public.keep_alive() to anon, authenticated, service_role;
+
+-- ---- წაშლილი ფოტოების, ვიდეოების და ხმოვანების დასუფთავება საცავიდან (bucket „media“).
+-- 1) ტრიგერები: როცა ჩანაწერი იშლება ან ფოტო იცვლება, ძველი ფაილის გზა რიგში (media_trash) ჩადის;
+-- 2) api/daily.js (service გასაღებით) დღეში ერთხელ იღებს რიგს — media_cleanup_take — და შლის მხოლოდ იმას,
+--    რასაც აღარაფერი იყენებს (media_in_use: მაგ. სთორი ჰაილაითში ან ჩატში პასუხად რჩება);
+-- 3) ატვირთული, მაგრამ არსად მიმაგრებული ფაილები (გაუქმებული პოსტი, შეუნახავი ავატარი) — დღე-ნახევრის შემდეგ.
+-- ახალი სვეტი ფოტოთი? დაამატე media_collect ტრიგერში და media_in_use-ში.
+create table if not exists public.media_trash (
+  path text primary key,
+  created_at timestamptz not null default now()
+);
+alter table public.media_trash enable row level security;
+revoke all on public.media_trash from anon, authenticated;
+
+-- რომელი ფაილებიდან დაიწყო ძებნა (მხოლოდ ამ განახლების შემდეგ ატვირთულები — ძველს არ ვეხებით)
+create table if not exists public.media_sweep (
+  id boolean primary key default true check (id),
+  last_at timestamptz not null default now()
+);
+insert into public.media_sweep default values on conflict do nothing;
+alter table public.media_sweep enable row level security;
+revoke all on public.media_sweep from anon, authenticated;
+
+-- ჩვენი საცავის გზები ნებისმიერი მნიშვნელობიდან (ტექსტი, jsonb, მთელი ჩანაწერი)
+create or replace function public.media_paths(v jsonb)
+returns setof text language sql immutable as $$
+  select distinct m[1] from regexp_matches(coalesce(v::text, ''), '/storage/v1/object/public/media/([^"?#\s\\]+)', 'g') as m
+$$;
+
+create or replace function public.media_collect()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into media_trash (path)
+  select p from public.media_paths(to_jsonb(old)) p
+  where tg_op = 'DELETE' or p not in (select public.media_paths(to_jsonb(new)))
+  on conflict (path) do nothing;
+  return null;
+end $$;
+
+do $$ declare t record; begin
+  for t in select * from (values
+    ('profiles', 'avatar_url'), ('posts', 'media'), ('stories', null), ('messages', 'media_url, meta'),
+    ('dating_profiles', 'photos'), ('groups', 'cover_url'), ('events', 'cover_url'), ('highlights', 'cover_url'),
+    ('highlight_items', null), ('listings', 'photos, thumb'), ('conversations', 'avatar_url')) as v(tbl, cols)
+  loop
+    execute format('drop trigger if exists media_collect on public.%I', t.tbl);
+    execute format('create trigger media_collect after delete%s on public.%I for each row execute function public.media_collect()',
+      case when t.cols is null then '' else ' or update of ' || t.cols end, t.tbl);
+  end loop;
+end $$;
+
+-- ფაილს ჯერ კიდევ რამე იყენებს? გზის პირველი საქაღალდე ამტვირთავის id-ია — დიდ ცხრილებში მხოლოდ მის ჩანაწერებს ვამოწმებთ.
+-- უცნობი ფორმის გზა — ყოველთვის „გამოიყენება“ (არასდროს წაიშლება).
+create or replace function public.media_in_use(p text)
+returns boolean language plpgsql stable security definer set search_path = public as $$
+declare o uuid;
+begin
+  if p is null or split_part(p, '/', 1) !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then return true; end if;
+  o := split_part(p, '/', 1)::uuid;
+  return exists (select 1 from profiles where strpos(coalesce(avatar_url, ''), p) > 0)
+    or exists (select 1 from groups where strpos(coalesce(cover_url, ''), p) > 0)
+    or exists (select 1 from events where strpos(coalesce(cover_url, ''), p) > 0)
+    or exists (select 1 from conversations where strpos(coalesce(avatar_url, ''), p) > 0)
+    or exists (select 1 from posts where author_id = o and strpos(media::text, p) > 0)
+    or exists (select 1 from stories where author_id = o and strpos(media_url, p) > 0)
+    or exists (select 1 from highlights h where h.owner_id = o and (strpos(coalesce(h.cover_url, ''), p) > 0
+               or exists (select 1 from highlight_items i where i.highlight_id = h.id and strpos(i.media_url, p) > 0)))
+    or exists (select 1 from listings where seller_id = o and (strpos(photos::text, p) > 0 or strpos(coalesce(thumb, ''), p) > 0))
+    or exists (select 1 from dating_profiles where user_id = o and strpos(photos::text, p) > 0)
+    or exists (select 1 from messages m join conversation_members c on c.conversation_id = m.conversation_id and c.user_id = o
+               where strpos(coalesce(m.media_url, '') || coalesce(m.meta::text, ''), p) > 0);
+end $$;
+
+-- დღიური დასუფთავება: აბრუნებს წასაშლელ გზებს (მაქს. p_limit) და რიგიდან იღებს
+create or replace function public.media_cleanup_take(p_limit int default 200)
+returns text[] language plpgsql security definer set search_path = public as $$
+declare
+  n int := least(greatest(coalesce(p_limit, 200), 1), 1000);
+  out text[] := '{}';
+  r record;
+  cur timestamptz;
+begin
+  -- 1) წაშლილი შიგთავსის ფაილები — საათის შემდეგ (თუ ფოტო ისევ სადმე გამოიყენება, რჩება)
+  for r in select path from media_trash where created_at < now() - interval '1 hour' order by created_at limit n for update skip locked loop
+    delete from media_trash where path = r.path;
+    if not public.media_in_use(r.path) then out := out || r.path; end if;
+  end loop;
+  -- 2) ატვირთული, მაგრამ არსად მიმაგრებული — ერთი დღის შემდეგ, თითოეული ერთხელ (media_sweep.last_at-დან)
+  select last_at into cur from media_sweep where id for update;
+  if cur is not null and cardinality(out) < n then
+    for r in select o.name, o.created_at from storage.objects o
+             where o.bucket_id = 'media' and o.created_at > cur and o.created_at < now() - interval '1 day'
+             order by o.created_at limit n * 2 loop
+      cur := r.created_at;
+      if not (r.name = any(out)) and not public.media_in_use(r.name) then out := out || r.name; end if;
+      exit when cardinality(out) >= n;
+    end loop;
+    update media_sweep set last_at = cur where id;
+  end if;
+  return out;
+end $$;
+
+-- საცავმა თუ ვერ წაშალა — რიგში ბრუნდება, შემდეგ ჯერზე ვცდით
+create or replace function public.media_cleanup_return(p_paths text[])
+returns void language sql security definer set search_path = public as $$
+  insert into media_trash (path, created_at) select unnest(p_paths), now() - interval '2 hours' on conflict (path) do nothing
+$$;
+
+revoke execute on function public.media_in_use(text) from public, anon, authenticated;
+revoke execute on function public.media_cleanup_take(int) from public, anon, authenticated;
+revoke execute on function public.media_cleanup_return(text[]) from public, anon, authenticated;
+grant execute on function public.media_cleanup_take(int) to service_role;
+grant execute on function public.media_cleanup_return(text[]) to service_role;
 
 -- =====================================================================
 -- ეტაპი H: თვიური სეზონები (ლიგებით და პრიზებით) და მეგობრების რეიტინგი
@@ -125,395 +465,3 @@ begin
   return now();
 end $$;
 grant execute on function public.keep_alive() to anon, authenticated, service_role;
-
--- რეიტინგის ცხრილი: p_period 'season' (მიმდინარე თვე) ან 'all' (საერთო), p_scope 'all' ან 'friends' (შენ + ვისაც გამოიწერ)
-create or replace function public.game_board(p_type text, p_period text default 'season', p_scope text default 'all')
-returns jsonb language plpgsql security definer set search_path = public as $$
-declare
-  me uuid := auth.uid();
-  s date := public.season_now();
-  v_rows jsonb; v_me jsonb; v_champs jsonb; v_all int;
-begin
-  if me is null then return null; end if;
-  perform public.season_finalize_due();
-  select rating into v_all from game_stats where user_id = me and type = p_type;
-  with pool as (
-    select x.user_id, x.rating, x.games, x.wins, x.losses, x.draws
-      from (select g.user_id, g.rating, g.wins + g.losses + g.draws as games, g.wins, g.losses, g.draws
-              from game_stats g where p_period = 'all' and g.type = p_type
-            union all
-            select ss.user_id, ss.rating, ss.games, ss.wins, ss.losses, ss.draws
-              from season_stats ss where p_period <> 'all' and ss.season = s and ss.type = p_type) x
-      join profiles p on p.id = x.user_id
-     where x.games > 0 and p.onboarded and (p.banned_until is null or p.banned_until < now())
-       and not public.is_blocked(me, x.user_id)
-       and (p_scope <> 'friends' or x.user_id = me
-            or exists (select 1 from follows f where f.follower_id = me and f.following_id = x.user_id))
-  ), ranked as (
-    select pool.*, rank() over (order by rating desc) as pos from pool
-  ), shown as (
-    select r.*, jsonb_build_object('pos', r.pos, 'user_id', r.user_id, 'rating', r.rating, 'games', r.games,
-             'wins', r.wins, 'losses', r.losses, 'draws', r.draws,
-             'league', case when p_period = 'all' then null else public.season_league(r.rating) end,
-             'provisional', p_period <> 'all' and r.games < 5,
-             'p', jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name,
-                                     'avatar_url', p.avatar_url, 'verified', p.verified)) as j
-      from ranked r join profiles p on p.id = r.user_id
-  )
-  select (select coalesce(jsonb_agg(j order by pos, rating desc, user_id), '[]'::jsonb) from (select * from shown order by pos, user_id limit 50) t),
-         (select j from shown where user_id = me)
-    into v_rows, v_me;
-  select coalesce(jsonb_agg(jsonb_build_object('place', r.place, 'rating', r.rating, 'league', r.league,
-           'p', jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url, 'verified', p.verified))
-           order by r.place), '[]'::jsonb)
-    into v_champs
-    from season_results r join profiles p on p.id = r.user_id
-   where r.season = (s - interval '1 month')::date and r.type = p_type and r.place <= 3;
-  return jsonb_build_object(
-    'period', p_period, 'scope', p_scope, 'type', p_type,
-    'season', s, 'ends_at', (s + interval '1 month')::timestamp at time zone 'Asia/Tbilisi',
-    'rows', v_rows, 'me', v_me, 'champions', v_champs,
-    'start', public.season_start(v_all));
-end $$;
-grant execute on function public.game_board(text, text, text) to authenticated;
-
-alter table public.notifications drop constraint if exists notifications_type_check;
-alter table public.notifications add constraint notifications_type_check check (type in (
-  'like', 'reply', 'follow', 'gift', 'match', 'game_invite', 'quote',
-  'group_request', 'group_approved', 'event_rsvp', 'tournament_start', 'tournament_end',
-  'follow_request', 'follow_accept', 'listing_price', 'achievement', 'level_up', 'invite_joined', 'mention', 'season_end'));
-
--- Push: კატეგორიები და ტექსტები (სეზონის დასრულება — „თამაშების“ კატეგორიაში)
-create or replace function public.push_category(p_payload jsonb)
-returns text language sql immutable as $$
-  select case
-    when p_payload ->> 'tag' like 'conv-%' then 'messages'
-    when p_payload ->> 'tag' like 'call-%' then 'calls'
-    when p_payload ->> 'tag' like 'game-%' then 'games'
-    when p_payload ->> 'tag' ~ '^n-(reply|quote|mention)-' then 'replies'
-    when p_payload ->> 'tag' ~ '^n-like-' then 'likes'
-    when p_payload ->> 'tag' ~ '^n-(follow|follow_request|follow_accept|invite_joined)-' then 'follows'
-    when p_payload ->> 'tag' ~ '^n-(game_invite|tournament_start|tournament_end|season_end)-' then 'games'
-    when p_payload ->> 'tag' ~ '^n-match-' then 'dating'
-    when p_payload ->> 'tag' ~ '^n-listing_price-' then 'market'
-    when p_payload ->> 'tag' ~ '^n-(group_request|group_approved|event_rsvp)-' then 'groups'
-    when p_payload ->> 'tag' ~ '^n-(gift|achievement|level_up)-' then 'rewards'
-    else 'other' end;
-$$;
-
--- Push-ის ტექსტები ყველა ტიპისთვის (მოხსენიება, სეზონის დასრულება)
-create or replace function public.on_notification_push()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_actor text; v_group text; v_event text;
-begin
-  select coalesce(nullif(full_name, ''), username) into v_actor from profiles where id = new.actor_id;
-  select name into v_group from groups where id = new.group_id;
-  select title into v_event from events where id = new.event_id;
-  perform public.push_dispatch(new.user_id, jsonb_build_object(
-    'title', case when new.type like 'tournament%' or new.type = 'listing_price' then coalesce(new.data ->> 'title', 'ეზო') else coalesce(v_actor, 'ეზო') end,
-    'body', case new.type
-      when 'season_end' then case when (new.data ->> 'place')::int = 1
-          then '🏆 სეზონის ჩემპიონი — ' || public.game_title(new.data ->> 'type') || '! +' || (new.data ->> 'coins') || ' ბროწეული'
-          else 'სეზონი დასრულდა — ' || public.game_title(new.data ->> 'type') || ': მე-' || (new.data ->> 'place') || ' ადგილი'
-            || case when (new.data ->> 'coins')::int > 0 then ', +' || (new.data ->> 'coins') || ' ბროწეული' else '' end end
-      when 'tournament_start' then 'ტურნირი დაიწყო — შემოდი და ითამაშე'
-      when 'tournament_end' then case when (new.data ->> 'place')::int = 1 then '🏆 გაიმარჯვე ტურნირში!'
-        else 'ტურნირი დასრულდა. შენი ადგილი: მე-' || (new.data ->> 'place') || ' (' || (new.data ->> 'players') || '-დან)' end
-      when 'like' then 'მოიწონა შენი პოსტი' when 'reply' then 'გიპასუხა' when 'quote' then 'გაგიზიარა ციტატით'
-      when 'mention' then 'მოგიხსენია: ' || coalesce(left((select body from posts where id = new.post_id), 100), '')
-      when 'follow' then 'გამოგიწერა' when 'gift' then 'საჩუქარი გამოგიგზავნა'
-      when 'follow_request' then 'გამოწერას გთხოვს' when 'follow_accept' then 'დაგიდასტურა გამოწერა'
-      when 'achievement' then 'ახალი მიღწევა: ' || coalesce((select title from badges where key = new.data ->> 'badge'), '') || ' (+' || (new.data ->> 'coins') || ' ბროწეული)'
-      when 'invite_joined' then 'შენი მოწვევით შემოგვიერთდა 🎉 +20 ბროწეული'
-      when 'level_up' then 'ახალი დონე: ' || (new.data ->> 'level') || '! +' || (new.data ->> 'coins') || ' ბროწეული'
-      when 'listing_price' then 'შენახულ განცხადებას ფასი დაუკლეს: ' || public.price_text((new.data ->> 'price')::numeric, new.data ->> 'currency')
-      when 'match' then 'თქვენ ერთმანეთი მოიწონეთ!' when 'game_invite' then 'თამაშში გეპატიჟება'
-      when 'group_request' then 'ითხოვს გაწევრიანებას: ' || coalesce(v_group, 'ჯგუფი')
-      when 'group_approved' then 'მიგიღეს ჯგუფში: ' || coalesce(v_group, '')
-      when 'event_rsvp' then 'მოდის: ' || coalesce(v_event, 'შენს ივენთზე')
-      else 'ახალი შეტყობინება' end,
-    'url', case when new.type = 'game_invite' and new.game_id is not null then '/g/' || new.game_id
-                when new.tournament_id is not null then '/t/' || new.tournament_id
-                when new.type = 'match' then '/dating?tab=matches'
-                when new.type = 'follow_request' then '/requests'
-                when new.type = 'listing_price' then '/market/' || (new.data ->> 'listing_id')
-                when new.type = 'season_end' then '/games?board=' || (new.data ->> 'type')
-                when new.type in ('achievement', 'level_up') then '/rewards'
-                when new.group_id is not null then '/groups/' || (select slug from groups where id = new.group_id)
-                when new.event_id is not null then '/events/' || new.event_id
-                when new.post_id is not null then '/p/' || new.post_id else '/notifications' end,
-    'tag', 'n-' || new.type || '-' || coalesce(new.post_id::text, new.group_id::text, new.tournament_id::text, new.data ->> 'listing_id', new.data ->> 'type', new.actor_id::text, '')));
-  return new;
-end $$;
-
--- =====================================================================
--- ეტაპი I: ჩატი — ძებნა, მიმაგრება და დადუმება, ქრებადი მესიჯები, გამოკითხვა ჯგუფურ ჩატში
--- =====================================================================
-
--- ---- მიმაგრება (მაქსიმუმ 5) და დადუმება — თითოეულ წევრს თავისი
-alter table public.conversation_members add column if not exists pinned_at timestamptz;
-alter table public.conversation_members add column if not exists muted_until timestamptz;
-
--- p_pin: true/false; p_mute_hours: 0 — ხმის ჩართვა, -1 — სამუდამოდ, N — N საათით
-create or replace function public.set_chat_prefs(p_conv uuid, p_pin boolean default null, p_mute_hours int default null)
-returns jsonb language plpgsql security definer set search_path = public as $$
-declare v conversation_members;
-begin
-  select * into v from conversation_members where conversation_id = p_conv and user_id = auth.uid() for update;
-  if not found then raise exception 'ჩატი ვერ მოიძებნა'; end if;
-  if p_pin is not null then
-    if p_pin and v.pinned_at is null
-       and (select count(*) from conversation_members where user_id = auth.uid() and pinned_at is not null) >= 5 then
-      raise exception 'მიმაგრება შეიძლება მაქსიმუმ 5 ჩატის';
-    end if;
-    update conversation_members set pinned_at = case when p_pin then coalesce(pinned_at, now()) end
-     where conversation_id = p_conv and user_id = auth.uid();
-  end if;
-  if p_mute_hours is not null then
-    update conversation_members set muted_until = case when p_mute_hours = 0 then null
-        when p_mute_hours < 0 then 'infinity'::timestamptz
-        else now() + make_interval(hours => least(p_mute_hours, 24 * 365)) end
-     where conversation_id = p_conv and user_id = auth.uid();
-  end if;
-  select * into v from conversation_members where conversation_id = p_conv and user_id = auth.uid();
-  return jsonb_build_object('pinned', v.pinned_at is not null, 'muted', coalesce(v.muted_until > now(), false),
-    'mute_forever', coalesce(v.muted_until = 'infinity'::timestamptz, false),
-    'muted_until', case when v.muted_until <> 'infinity'::timestamptz then v.muted_until end);
-end $$;
-grant execute on function public.set_chat_prefs(uuid, boolean, int) to authenticated;
-
--- ---- ქრებადი მესიჯები: ჩატის პარამეტრი — 24 საათი ან 7 დღე. ახალ მესიჯს ვადა უჩნდება;
--- ვადაგასული აღარავის უჩანს (RLS) და დღიური „გაღვიძებისას“ იშლება (ფოტო/ხმოვანიც — ეტაპი G-ის დასუფთავებით)
-alter table public.conversations add column if not exists disappear_hours int;
-alter table public.conversations drop constraint if exists conversations_disappear_check;
-alter table public.conversations add constraint conversations_disappear_check check (disappear_hours is null or disappear_hours in (24, 168));
-alter table public.messages add column if not exists expires_at timestamptz;
-create index if not exists messages_expires_idx on public.messages (expires_at) where expires_at is not null;
-
--- ახალი მესიჯი: ვადა (ქრებად ჩატში) და გამოკითხვის შემოწმება
-create or replace function public.messages_before_insert()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_kind text; v_hours int; v_opts jsonb;
-begin
-  select kind, disappear_hours into v_kind, v_hours from conversations where id = new.conversation_id;
-  new.expires_at := case when v_hours is not null and not (new.meta ? 'system') and not (new.meta ? 'call')
-                         then now() + make_interval(hours => v_hours) end;
-  if new.meta ? 'poll' then
-    v_opts := new.meta -> 'poll' -> 'options';
-    if v_kind is distinct from 'group' then raise exception 'გამოკითხვა მხოლოდ ჯგუფურ ჩატშია'; end if;
-    if jsonb_typeof(v_opts) is distinct from 'array' or jsonb_array_length(v_opts) not between 2 and 10
-       or exists (select 1 from jsonb_array_elements(v_opts) o where jsonb_typeof(o) <> 'string' or char_length(btrim(o #>> '{}')) not between 1 and 100)
-       or char_length(btrim(new.body)) not between 1 and 300 then
-      raise exception 'გამოკითხვას სჭირდება კითხვა და 2–10 პასუხი';
-    end if;
-    new.media_url := null; new.media_type := null;
-    new.meta := jsonb_build_object('poll', jsonb_build_object(
-      'options', (select jsonb_agg(btrim(o #>> '{}')) from jsonb_array_elements(v_opts) o),
-      'multi', coalesce((new.meta -> 'poll' ->> 'multi')::boolean, false)));
-  end if;
-  return new;
-end $$;
-drop trigger if exists messages_before_insert on public.messages;
-create trigger messages_before_insert before insert on public.messages
-  for each row execute function public.messages_before_insert();
-
-drop policy if exists "messages read" on public.messages;
-create policy "messages read" on public.messages for select to authenticated
-  using (public.is_member(conversation_id) and (expires_at is null or expires_at > now()));
-
--- ჩართვა/გამორთვა: პირად ჩატში ორივეს შეუძლია, ჯგუფურში — ადმინს. ჩატში ჩნდება სისტემური შეტყობინება.
-create or replace function public.set_disappearing(p_conv uuid, p_hours int)
-returns void language plpgsql security definer set search_path = public as $$
-declare v_kind text; v_old int;
-begin
-  if p_hours is not null and p_hours not in (24, 168) then raise exception 'ვადა უნდა იყოს 24 საათი ან 7 დღე'; end if;
-  if not public.is_member(p_conv) or not public.can_act() then raise exception 'ჩატი ვერ მოიძებნა'; end if;
-  select kind, disappear_hours into v_kind, v_old from conversations where id = p_conv for update;
-  if v_kind = 'group' and public.chat_role(p_conv) is distinct from 'admin' then
-    raise exception 'ჯგუფურ ჩატში ამას მხოლოდ ადმინი ცვლის';
-  end if;
-  if v_old is not distinct from p_hours then return; end if;
-  update conversations set disappear_hours = p_hours where id = p_conv;
-  insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(),
-    case when p_hours is null then 'გამორთო ქრებადი მესიჯები'
-         when p_hours = 24 then 'ჩართო ქრებადი მესიჯები: ახალი მესიჯები ქრება 24 საათში'
-         else 'ჩართო ქრებადი მესიჯები: ახალი მესიჯები ქრება 7 დღეში' end,
-    jsonb_build_object('system', true, 'disappear', p_hours));
-end $$;
-grant execute on function public.set_disappearing(uuid, int) to authenticated;
-
-create or replace function public.purge_expired_messages()
-returns int language plpgsql security definer set search_path = public as $$
-declare n int;
-begin
-  delete from messages where id in (select id from messages where expires_at < now() order by expires_at limit 5000);
-  get diagnostics n = row_count;
-  return n;
-end $$;
-revoke execute on function public.purge_expired_messages() from public, anon, authenticated;
-
--- დღიური „გაღვიძება“ (ეტაპი G, H): სეზონების დახურვა და ვადაგასული მესიჯების წაშლა
-create or replace function public.keep_alive()
-returns timestamptz language plpgsql security definer set search_path = public as $$
-begin
-  perform public.season_finalize_due();
-  perform public.purge_expired_messages();
-  return now();
-end $$;
-grant execute on function public.keep_alive() to anon, authenticated, service_role;
-
--- ---- შემოსულები: მიმაგრებული ზემოთ, დადუმება, ქრებადობა; ვადაგასული ბოლო მესიჯი აღარ ჩანს
-drop function if exists public.my_conversations();
-create or replace function public.my_conversations()
-returns table (id uuid, kind text, updated_at timestamptz, last_message text, last_sender uuid, unread boolean, other jsonb,
-               title text, avatar_url text, my_role text, members_count bigint, members jsonb, last_sender_name text,
-               pinned boolean, muted boolean, mute_forever boolean, muted_until timestamptz, disappear_hours int)
-language sql stable security definer set search_path = public as $$
-  select c.id, c.kind, c.updated_at,
-    case when c.disappear_hours is not null and c.updated_at < now() - make_interval(hours => c.disappear_hours) then null else c.last_message end,
-    c.last_sender,
-    (c.last_sender is not null and c.last_sender <> auth.uid() and c.updated_at > m.last_read_at) as unread,
-    case when c.kind <> 'group' then
-      (select jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name,
-               'avatar_url', p.avatar_url, 'last_seen', p.last_seen)
-         from conversation_members o join profiles p on p.id = o.user_id
-        where o.conversation_id = c.id and o.user_id <> auth.uid() limit 1) end as other,
-    c.title, c.avatar_url, m.role,
-    (select count(*) from conversation_members x where x.conversation_id = c.id),
-    (select coalesce(jsonb_agg(jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url)), '[]')
-       from (select p.* from conversation_members o join profiles p on p.id = o.user_id
-              where o.conversation_id = c.id and o.user_id <> auth.uid() order by o.user_id limit 3) p),
-    (select coalesce(nullif(split_part(full_name, ' ', 1), ''), username) from profiles where id = c.last_sender),
-    m.pinned_at is not null, coalesce(m.muted_until > now(), false), coalesce(m.muted_until = 'infinity'::timestamptz, false),
-    case when m.muted_until <> 'infinity'::timestamptz then m.muted_until end,
-    c.disappear_hours
-  from conversations c
-  join conversation_members m on m.conversation_id = c.id and m.user_id = auth.uid()
-  where public.mfa_ok()
-  order by m.pinned_at desc nulls last, c.updated_at desc;
-$$;
-grant execute on function public.my_conversations() to authenticated;
-
--- ---- Push: დადუმებულ წევრს არა; გამოკითხვა — „📊 კითხვა“
-create or replace function public.on_message_push()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_sender text; v_member uuid; v_kind text; v_title text; v_text text;
-begin
-  if new.meta ? 'call' then return new; end if;
-  select coalesce(nullif(full_name, ''), username) into v_sender from profiles where id = new.sender_id;
-  select kind, title into v_kind, v_title from conversations where id = new.conversation_id;
-  v_text := case when new.meta ? 'poll' then '📊 ' || left(new.body, 130)
-                 when new.media_type = 'image' then '📷 ფოტო' when new.media_type = 'audio' then '🎙 ხმოვანი მესიჯი'
-                 else left(new.body, 140) end;
-  for v_member in
-    select user_id from conversation_members
-     where conversation_id = new.conversation_id and user_id <> new.sender_id
-       and (muted_until is null or muted_until <= now())
-  loop
-    perform public.push_dispatch(v_member, jsonb_build_object(
-      'title', case when v_kind = 'group' then coalesce(v_title, 'ჯგუფური ჩატი') else coalesce(v_sender, 'ეზო') end,
-      'body', case when v_kind = 'group' then coalesce(v_sender, '') || ': ' || v_text else v_text end,
-      'url', '/chat/' || new.conversation_id,
-      'tag', 'conv-' || new.conversation_id));
-  end loop;
-  return new;
-end $$;
-
--- შემოსულების ბოლო მესიჯი გამოკითხვისთვის
-create or replace function public.on_message()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  update conversations set
-    last_message = case when new.media_type = 'image' then '📷 ფოტო'
-                        when new.media_type = 'audio' then '🎙 ხმოვანი'
-                        when new.meta ? 'call' then case when new.meta -> 'call' ->> 'status' in ('missed', 'declined', 'busy')
-                                                         then '📞 გამოტოვებული ზარი' else '📞 ზარი' end
-                        when new.meta ? 'poll' then '📊 ' || left(new.body, 110)
-                        when new.meta ? 'story' then '↩ სთორზე: ' || left(new.body, 100)
-                        when new.meta ? 'listing' then '🏷 ' || left(new.body, 110)
-                        else left(new.body, 120) end,
-    last_sender = new.sender_id,
-    updated_at = new.created_at
-  where id = new.conversation_id;
-  update conversation_members set last_read_at = new.created_at
-  where conversation_id = new.conversation_id and user_id = new.sender_id;
-  return new;
-end $$;
-
--- ---- მესიჯებში ძებნა: ჩემს ჩატებში (ან ერთ ჩატში), ქართული/ლათინური ერთნაირად (ka_skeleton, ეტაპი C)
-do $$
-declare s text;
-begin
-  select n.nspname into s from pg_extension e join pg_namespace n on n.oid = e.extnamespace where e.extname = 'pg_trgm';
-  if s is not null then
-    execute format('create index if not exists messages_search_trgm on public.messages using gin (public.ka_skeleton(body) %I.gin_trgm_ops) where deleted_at is null', s);
-  end if;
-end $$;
-
-create or replace function public.search_messages(p_q text, p_conv uuid default null)
-returns jsonb language plpgsql stable security definer set search_path = public as $$
-declare k text := public.ka_skeleton(btrim(coalesce(p_q, '')));
-begin
-  if auth.uid() is null or char_length(k) < 2 or not public.mfa_ok() then return '[]'::jsonb; end if;
-  k := replace(replace(replace(k, '\', '\\'), '%', '\%'), '_', '\_');
-  return coalesce((select jsonb_agg(to_jsonb(x) order by x.created_at desc) from (
-    select m.id, m.conversation_id, m.sender_id, left(m.body, 300) as body, m.created_at, c.kind, c.title,
-           (select jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url)
-              from profiles p where p.id = m.sender_id) as sender,
-           case when c.kind <> 'group' then
-             (select jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url)
-                from conversation_members o join profiles p on p.id = o.user_id
-               where o.conversation_id = c.id and o.user_id <> auth.uid() limit 1) end as other
-      from messages m
-      join conversation_members cm on cm.conversation_id = m.conversation_id and cm.user_id = auth.uid()
-      join conversations c on c.id = m.conversation_id
-     where (p_conv is null or m.conversation_id = p_conv)
-       and m.deleted_at is null and (m.expires_at is null or m.expires_at > now())
-       and m.body <> '' and not (m.meta ? 'system')
-       and public.ka_skeleton(m.body) like '%' || k || '%'
-     order by m.created_at desc
-     limit 50) x), '[]'::jsonb);
-end $$;
-grant execute on function public.search_messages(text, uuid) to authenticated;
-
--- ---- გამოკითხვა ჯგუფურ ჩატში: მესიჯი meta.poll = { options[], multi }, ხმები — ცალკე (ჩატის წევრები ხედავენ)
-create table if not exists public.chat_poll_votes (
-  message_id uuid not null references public.messages on delete cascade,
-  conversation_id uuid not null references public.conversations on delete cascade,
-  user_id uuid not null references public.profiles on delete cascade,
-  option int not null check (option between 0 and 9),
-  created_at timestamptz not null default now(),
-  primary key (message_id, user_id, option)
-);
-create index if not exists chat_poll_votes_conv_idx on public.chat_poll_votes (conversation_id);
-alter table public.chat_poll_votes enable row level security;
-drop policy if exists "poll votes read" on public.chat_poll_votes;
-create policy "poll votes read" on public.chat_poll_votes for select to authenticated using (public.is_member(conversation_id));
-grant select on public.chat_poll_votes to authenticated;
-alter table public.chat_poll_votes replica identity full;
-do $$ begin
-  begin alter publication supabase_realtime add table public.chat_poll_votes; exception when duplicate_object then null; end;
-end $$;
-
--- ჩემი ხმა: p_options — არჩეული პასუხები (ცარიელი — ხმის გაუქმება)
-create or replace function public.vote_chat_poll(p_msg uuid, p_options int[])
-returns void language plpgsql security definer set search_path = public as $$
-declare v_m messages; v_n int; v_multi boolean; v_opts int[];
-begin
-  select * into v_m from messages where id = p_msg;
-  if not found or not public.is_member(v_m.conversation_id) or v_m.deleted_at is not null or not (v_m.meta ? 'poll')
-     or (v_m.expires_at is not null and v_m.expires_at <= now()) then
-    raise exception 'გამოკითხვა ვერ მოიძებნა';
-  end if;
-  if not public.can_act() then raise exception 'ანგარიში შეზღუდულია'; end if;
-  v_n := jsonb_array_length(v_m.meta -> 'poll' -> 'options');
-  v_multi := coalesce((v_m.meta -> 'poll' ->> 'multi')::boolean, false);
-  v_opts := array(select distinct x from unnest(coalesce(p_options, '{}'::int[])) x order by x);
-  if exists (select 1 from unnest(v_opts) x where x < 0 or x >= v_n) then raise exception 'ასეთი პასუხი არ არის'; end if;
-  if not v_multi and cardinality(v_opts) > 1 then raise exception 'აქ მხოლოდ ერთი პასუხი შეიძლება'; end if;
-  delete from chat_poll_votes where message_id = p_msg and user_id = auth.uid() and not (option = any(v_opts));
-  insert into chat_poll_votes (message_id, conversation_id, user_id, option)
-  select p_msg, v_m.conversation_id, auth.uid(), x from unnest(v_opts) x
-  on conflict do nothing;
-end $$;
-grant execute on function public.vote_chat_poll(uuid, int[]) to authenticated;

@@ -50,8 +50,9 @@ export default function DominoTable({ state, seat = 'a', canMove, onMove }) {
           {picked !== null && <button className="end-btn" onClick={() => onMove({ play: hand[picked], side: 'R' }, () => domino.play(state, picked, 'R'))}>აქ</button>}
         </div>
       </div>
-      <div className="my-hand" aria-label="შენი ქვები">
-        {hand.map((t, i) => (
+      <div className="my-hand" aria-label={hand.some((t) => !t) ? `${hand.length} დამალული ქვა` : 'შენი ქვები'}>
+        {/* მაყურებელი და ჩანაწერი: ხელი დამალულია — მხოლოდ ზურგი ჩანს */}
+        {hand.map((t, i) => !t ? <i key={`x${i}`} className="back" /> : (
           <button key={`${t[0]}${t[1]}`} onClick={() => tapTile(i)}
             className={canMove ? (picked === i ? 'picked' : playableIdx.has(i) ? 'can' : 'no') : ''}
             aria-label={`${t[0]}:${t[1]}`}>

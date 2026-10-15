@@ -49,6 +49,7 @@ const RoomMod = () => import('./pages/GameRoom.jsx')
 const OnlineGame = lazy(() => RoomMod().then((m) => ({ default: m.OnlineGame })))
 const LocalGameRoute = lazy(() => RoomMod().then((m) => ({ default: m.LocalGameRoute })))
 const TournamentPage = lazy(() => import('./pages/Tournament.jsx'))
+const Replay = lazy(() => import('./pages/Replay.jsx'))
 const SocialMod = () => import('./pages/Social.jsx')
 const Saved = lazy(() => SocialMod().then((m) => ({ default: m.Saved })))
 const FollowRequests = lazy(() => SocialMod().then((m) => ({ default: m.FollowRequests })))
@@ -99,6 +100,7 @@ const ROUTES = [
   ['/dating', () => <Dating />],
   ['/games', () => <Games />],
   ['/g/:id', (p) => <OnlineGame key={p.id} id={p.id} />, { noNav: true, noAside: true }],
+  ['/g/:id/replay', (p) => <Replay key={p.id} id={p.id} />, { noNav: true, noAside: true }],
   ['/play/:type', (p, q) => <LocalGameRoute type={p.type} query={q} />, { noNav: true, noAside: true }],
   ['/t/:id', (p) => <TournamentPage key={p.id} id={p.id} />],
   ['/saved', () => <Saved />],

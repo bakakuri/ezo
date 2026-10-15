@@ -10,6 +10,8 @@ export function Swatch({ type }) {
       {type === 'nardi' && <span className="hstack" style={{ gap: 4, transform: 'scale(.62)' }}><Die n={6} /><Die n={5} /></span>}
       {type === 'longnardi' && <span className="ln-stack"><i /><i /><i /><i /></span>}
       {type === 'chess' && <Piece p="N" className="" />}
+      {type === 'chess960' && <span className="sw-960"><Piece p="R" className="" /><b>960</b></span>}
+      {type === 'gomoku' && <span className="sw-gomoku"><i className="a" /><i className="b" /><i className="a" /></span>}
       {type === 'checkers' && <span className="disc w" style={{ width: 40, height: 40 }} />}
       {type === 'domino' && <span style={{ transform: 'rotate(-18deg)' }}><Tile a={6} b={4} v /></span>}
       {type === 'durak' && <span className="sw-cards"><Card c="6s" size="xs" /><Card c="Kh" size="xs" /></span>}

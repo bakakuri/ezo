@@ -5,6 +5,7 @@ import ChessBoard from '../components/games/ChessBoard.jsx'
 import CheckersBoard from '../components/games/CheckersBoard.jsx'
 import NardiBoard from '../components/games/NardiBoard.jsx'
 import DominoTable from '../components/games/DominoTable.jsx'
+import GomokuBoard from '../components/games/GomokuBoard.jsx'
 import DurakTable from '../components/games/DurakTable.jsx'
 import JokerTable from '../components/games/JokerTable.jsx'
 import BuraTable from '../components/games/BuraTable.jsx'
@@ -12,13 +13,15 @@ import LotoTable from '../components/games/LotoTable.jsx'
 import { GameSocial } from '../components/games/GameSocial.jsx'
 import { GAMES, outcome, RESULT_TEXT, cryptoRand, seatsOf, SEAT_LETTERS, loto } from '../games/index.js'
 import { BOTS } from '../games/bots.js'
+import { REPLAYABLE } from '../games/hidden.js'
 import { api } from '../lib/api.js'
 import { useAuth } from '../lib/auth.jsx'
 import { Link, navigate } from '../lib/router.jsx'
 import { useToast } from '../components/Toast.jsx'
 
-const BOARDS = {
-  chess: ChessBoard, checkers: CheckersBoard, nardi: NardiBoard, domino: DominoTable,
+export const BOARDS = {
+  chess: ChessBoard, chess960: (p) => <ChessBoard {...p} variant="960" />, gomoku: GomokuBoard,
+  checkers: CheckersBoard, nardi: NardiBoard, domino: DominoTable,
   longnardi: (p) => <NardiBoard {...p} variant="long" />, durak: DurakTable, joker: JokerTable,
   bura: BuraTable, loto: LotoTable,
 }
@@ -34,7 +37,7 @@ function statusFor(type, state, { mySeat, names, seatToMove, over }) {
   if (over || type === 'loto') return null
   const mine = mySeat === seatToMove
   const who = names[seatToMove]
-  if (type === 'chess' && outcome(type, state).check) return { alert: true, text: mine ? 'შახი! დაიცავი მეფე' : `შახი გამოუცხადე ${who}-ს` }
+  if ((type === 'chess' || type === 'chess960') && outcome(type, state).check) return { alert: true, text: mine ? 'შახი! დაიცავი მეფე' : `შახი გამოუცხადე ${who}-ს` }
   if (type === 'nardi' || type === 'longnardi') {
     if (state.noMoves && state.passedBy) {
       const passer = names[state.passedBy === 'w' ? 'a' : 'b']
@@ -89,8 +92,10 @@ function useClockNow(active) {
   return now
 }
 
-function GameFrame({ type, players, mySeat, seatToMove, state, board, status, onResign, result, onAgain, againText, extra, clocks, banner }) {
-  const colorDot = (seat) => (['domino', 'durak', 'bura'].includes(type) ? null : <span className={`seat-dot ${seat === 'a' ? 'w' : 'b'}`} />)
+function GameFrame({ type, players, mySeat, seatToMove, state, board, status, onResign, result, onAgain, againText, extra, clocks, banner, replayTo }) {
+  // ხუთ რიგში შავები იწყებენ: a — შავი
+  const light = (seat) => (type === 'gomoku' ? seat === 'b' : seat === 'a')
+  const colorDot = (seat) => (['domino', 'durak', 'bura'].includes(type) ? null : <span className={`seat-dot ${light(seat) ? 'w' : 'b'}`} />)
   const top = mySeat === 'b' ? 'a' : 'b'
   const bottom = top === 'a' ? 'b' : 'a'
   const sub = (seat) => {
@@ -98,7 +103,7 @@ function GameFrame({ type, players, mySeat, seatToMove, state, board, status, on
     if (type === 'durak') return `${state.hands[seat].length} კარტი${state.attacker === seat ? ', უტევს' : ''}`
     if (type === 'bura') return `${state.points[seat]} ქულა`
     if (type === 'checkers') return `${state.board.filter((p) => p && p.toLowerCase() === (seat === 'a' ? 'w' : 'b')).length} ქვა`
-    return seat === 'a' ? 'თეთრი' : 'შავი'
+    return light(seat) ? 'თეთრი' : 'შავი'
   }
   const P = ({ seat, right }) => (
     <div className={`player${seatToMove === seat && !result ? ' turn' : ''}${right ? ' right' : ''}`}>
@@ -111,6 +116,7 @@ function GameFrame({ type, players, mySeat, seatToMove, state, board, status, on
     <div className={`game-room g-${type}${clocks ? ' clocked' : ''}`}>
       <TopBar title={GAMES[type].title} backTo="/games">
         {onResign && !result && <button className="btn btn-ghost sm" onClick={onResign}><Icon name="flag" size={16} />{seatsOf(type) > 2 ? 'დატოვება' : 'დანებება'}</button>}
+        {replayTo && <Link className="btn btn-ghost sm" to={replayTo}><Icon name="play" size={16} />ჩანაწერი</Link>}
       </TopBar>
       {banner}
       {seatsOf(type) === 2 && !clocks && <div className="players"><P seat={top} /><span className="vs">vs</span><P seat={bottom} right /></div>}
@@ -138,6 +144,7 @@ function GameFrame({ type, players, mySeat, seatToMove, state, board, status, on
               {result.link ? <Link className="btn btn-outline lg" to={result.link.to}>{result.link.text}</Link>
                 : <button className="btn btn-outline lg" onClick={() => navigate('/games')}>თამაშები</button>}
             </div>
+            {replayTo && <Link className="btn btn-ghost rp-open" to={replayTo}><Icon name="play" size={16} />პარტიის ჩანაწერი</Link>}
           </div>
         </Sheet>
       )}
@@ -433,6 +440,7 @@ export function OnlineGame({ id }) {
         board={<Board state={state} orientation={mySeat || 'a'} seat={mySeat || 'a'} canMove={canMove} onMove={onMove} players={players} />}
         onResign={mySeat ? () => setConfirm(true) : null}
         clocks={clocks}
+        replayTo={finished && REPLAYABLE.includes(type) && (g.move_no || 0) > 1 ? `/g/${id}/replay` : null}
         banner={<>{tourBanner}{!mySeat && !finished && <div className="watch-banner"><Icon name="eye" size={16} />შენ უყურებ — {Object.values(players).filter(Boolean).map((p) => (p.full_name || p.username || '').split(' ')[0]).join(' და ')}</div>}</>}
         extra={<GameSocial gameId={id} me={me} isPlayer={Boolean(mySeat)} active={!finished} />}
         result={finished && !dismissed ? {

@@ -1,6 +1,8 @@
 // სერვერული თამაშის ლოგიკა: კლიენტი აგზავნის მოქმედებას (action), სერვერი ამოწმებს და ასრულებს.
 // იყენებს Edge Function „game“ და დემო რეჟიმი — ერთი და იგივე კოდი.
 import * as chess from './chess.js'
+import * as chess960 from './chess960.js'
+import * as gomoku from './gomoku.js'
 import * as checkers from './checkers.js'
 import * as nardi from './nardi.js'
 import * as domino from './domino.js'
@@ -21,6 +23,7 @@ import { HIDDEN, withMyHand } from './hidden.js'
 export { HIDDEN, withMyHand }
 
 export function initFor(type, rand = cryptoRand, opts = {}) {
+  if (type === 'chess960') return chess960.initState(rand)
   if (type === 'domino') return domino.initState(rand)
   if (type === 'durak') return durak.initState(rand)
   if (type === 'joker') return joker.initState(rand, opts.mode)
@@ -35,7 +38,8 @@ const guard = (fn) => {
 }
 
 // action-ის ფორმატი:
-//   chess    { from, to, promo? }
+//   chess    { from, to, promo? }   (chess960 — იგივე; როქი: მეფე → საკუთარი ეტლის უჯრა)
+//   gomoku   { at: 0..224 }
 //   checkers { path: [..] }
 //   nardi    { roll: true } | { from, to }
 //   domino   { play: [x, y], side: 'L'|'R' } | { draw: true } | { pass: true }
@@ -52,6 +56,16 @@ export function applyAction(type, state, action, rand = cryptoRand) {
       const m = chess.legalMoves(s).find((x) => x.from === action.from && x.to === action.to && (x.promo || null) === (action.promo || null))
       if (!m) throw new IllegalMove()
       return chess.applyToState(state, m)
+    }
+    case 'chess960': {
+      const s = chess.fromFEN(state.fen)
+      const m = chess960.legalMoves(s).find((x) => x.from === action.from && x.to === action.to && (x.promo || null) === (action.promo || null))
+      if (!m) throw new IllegalMove()
+      return chess960.applyToState(state, m)
+    }
+    case 'gomoku': {
+      if (!Number.isInteger(action.at)) throw new IllegalMove()
+      return guard(() => gomoku.play(state, action.at))
     }
     case 'checkers': {
       if (!Array.isArray(action.path)) throw new IllegalMove()

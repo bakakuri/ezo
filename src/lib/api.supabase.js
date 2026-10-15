@@ -1,6 +1,6 @@
 import { supabase as sb } from './supabase.js'
 import { groupStories } from './groupStories.js'
-import { withMyHand, HIDDEN } from '../games/hidden.js'
+import { withMyHand, HIDDEN, REPLAYABLE } from '../games/hidden.js'
 import { isSchemaError, reportApiError } from './errors.js'
 
 // Supabase-ზე მომუშავე API. ინტერფეისი ზუსტად ემთხვევა api.demo.js-ს.
@@ -611,6 +611,21 @@ export const api = {
     return ok(await sb.from('games').select(GAME)
       .or(`player_a.eq.${u},player_b.eq.${u},player_c.eq.${u},player_d.eq.${u},invited.eq.${u},invites.cs.{${u}}`)
       .in('status', ['waiting', 'active']).order('updated_at', { ascending: false }).limit(30))
+  },
+  // ბოლო დასრულებული პარტიები, რომლებსაც ჩანაწერი აქვს
+  async recentGames(limit = 10) {
+    const u = uid()
+    return ok(await sb.from('games').select(GAME)
+      .or(`player_a.eq.${u},player_b.eq.${u},player_c.eq.${u},player_d.eq.${u}`)
+      .eq('status', 'finished').in('type', REPLAYABLE).order('updated_at', { ascending: false }).limit(limit))
+  },
+  // პარტიის ჩანაწერი: თამაში + ყოველი სვლის შემდეგი მდგომარეობა
+  async replay(id) {
+    const [game, moves] = await Promise.all([
+      sb.from('games').select(GAME).eq('id', id).maybeSingle().then(ok),
+      sb.from('game_moves').select('n,state').eq('game_id', id).order('n').limit(2000).then(ok),
+    ])
+    return game ? { game, moves } : null
   },
   async game(id) {
     const g = ok(await sb.from('games').select(GAME).eq('id', id).maybeSingle())

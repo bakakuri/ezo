@@ -24,6 +24,7 @@ export default function Games() {
   const [newTour, setNewTour] = useState(false)
   const [puzzle, setPuzzle] = useState(null)
   const [live, setLive] = useState([])
+  const [recent, setRecent] = useState([])
   const staff = ['moderator', 'admin'].includes(me?.role)
 
   useEffect(() => {
@@ -32,6 +33,7 @@ export default function Games() {
     api.tournaments().then(setTours).catch(() => setTours([]))
     api.dailyPuzzle().then(setPuzzle).catch(() => {})
     api.liveGames().then(setLive).catch(() => {})
+    api.recentGames(10).then(setRecent).catch(() => {})
   }, [me.id])
   // შეტყობინებიდან (?board=nardi) — პირდაპირ რეიტინგზე
   const { query } = useLocation()
@@ -125,6 +127,27 @@ export default function Games() {
         </button>
       ))}
 
+      {recent.length > 0 && (
+        <>
+          <div className="section-title"><h2>ბოლო პარტიები</h2></div>
+          <div className="live-row recent-row">
+            {recent.map((g) => {
+              const seat = g.player_a === me.id ? 'a' : 'b'
+              const opp = seat === 'a' ? g.b : g.a
+              const res = !g.winner ? 'draw' : g.winner === me.id ? 'won' : 'lost'
+              return (
+                <Link key={g.id} to={`/g/${g.id}/replay`} className="live-card recent-card">
+                  <Swatch type={g.type} />
+                  <b>{GAMES[g.type]?.title}</b>
+                  <span className="who">{opp && <Avatar user={opp} size={22} />}<small className="ellipsis">{opp ? (opp.full_name || opp.username).split(' ')[0] : 'მოწინააღმდეგე'}, {timeAgo(g.updated_at)}</small></span>
+                  <span className={`res ${res}`}>{{ won: 'მოგება', lost: 'წაგება', draw: 'ფრე' }[res]}</span>
+                </Link>
+              )
+            })}
+          </div>
+        </>
+      )}
+
       <div className="section-title">
         <h2>ტურნირები</h2>
         {staff && <button className="btn btn-ghost sm" onClick={() => setNewTour(true)}><Icon name="plus" size={16} />ტურნირი</button>}
@@ -143,7 +166,7 @@ export default function Games() {
 }
 
 const TCS = [[null, 'კლასიკური'], ['1+0', '1+0'], ['3+2', '3+2'], ['5+0', '5+0'], ['10+0', '10+0']]
-const CLOCKED = new Set(['chess', 'checkers'])
+const CLOCKED = new Set(['chess', 'chess960', 'checkers'])
 
 function ModeSheet({ type, onClose }) {
   const toast = useToast()

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { chess } from '../../games/index.js'
+import { chess, chess960 } from '../../games/index.js'
 
 // საკუთარი ფიგურების ნაკრები (SVG, 50×50)
 export function Piece({ p, className = 'piece' }) {
@@ -56,9 +56,11 @@ export function Piece({ p, className = 'piece' }) {
 
 const FILES = 'abcdefgh'
 
-export default function ChessBoard({ state, orientation = 'a', canMove, onMove }) {
+// variant="960" — ჭადრაკი 960: როქი — მეფე, მერე საკუთარი ეტლი (ან მეფის ბოლო უჯრა)
+export default function ChessBoard({ state, orientation = 'a', canMove, onMove, variant }) {
+  const rules = variant === '960' ? chess960 : chess
   const s = useMemo(() => chess.fromFEN(state.fen), [state.fen])
-  const legal = useMemo(() => (canMove ? chess.legalMoves(s) : []), [s, canMove])
+  const legal = useMemo(() => (canMove ? rules.legalMoves(s) : []), [s, canMove, rules])
   const [sel, setSel] = useState(null)
   const [promo, setPromo] = useState(null)
   const flipped = orientation === 'b'
@@ -81,7 +83,7 @@ export default function ChessBoard({ state, orientation = 'a', canMove, onMove }
   const play = (m) => {
     setSel(null)
     setPromo(null)
-    onMove({ from: m.from, to: m.to, promo: m.promo }, () => chess.applyToState(state, m))
+    onMove({ from: m.from, to: m.to, promo: m.promo }, () => rules.applyToState(state, m))
   }
 
   const order = Array.from({ length: 64 }, (_, i) => (flipped ? 63 - i : i))
@@ -103,7 +105,7 @@ export default function ChessBoard({ state, orientation = 'a', canMove, onMove }
             {i % 8 === 0 && <span className="coord r">{8 - r}</span>}
             {i >= 56 && <span className="coord f">{FILES[f]}</span>}
             {p && <Piece p={p} />}
-            {tgt && (p || tgt.flag === 'ep' ? <span className="ring" /> : <span className="dot" />)}
+            {tgt && (p || tgt.flag === 'ep' || tgt.flag === 'castle960' ? <span className={`ring${tgt.flag === 'castle960' ? ' castle' : ''}`} /> : <span className="dot" />)}
           </button>
         )
       })}

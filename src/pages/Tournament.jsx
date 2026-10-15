@@ -10,8 +10,8 @@ import { useToast } from '../components/Toast.jsx'
 import { CoinIcon } from '../components/Rewards.jsx'
 import { Swatch } from '../components/games/Swatch.jsx'
 
-export const TOURNAMENT_TYPES = ['nardi', 'longnardi', 'chess', 'checkers', 'durak', 'bura', 'domino']
-const CLOCKED = new Set(['chess', 'checkers'])
+export const TOURNAMENT_TYPES = ['nardi', 'longnardi', 'chess', 'chess960', 'checkers', 'gomoku', 'durak', 'bura', 'domino']
+const CLOCKED = new Set(['chess', 'chess960', 'checkers'])
 
 export function phaseOf(t, now = Date.now()) {
   if (now < Date.parse(t.starts_at)) return 'soon'

@@ -1,4 +1,6 @@
 import * as chess from './chess.js'
+import * as chess960 from './chess960.js'
+import * as gomoku from './gomoku.js'
 import * as checkers from './checkers.js'
 import * as nardi from './nardi.js'
 import * as domino from './domino.js'
@@ -23,6 +25,20 @@ export const GAMES = {
     blurb: 'სრული წესები, როქით და ან-პასანით',
     init: () => chess.initState(),
     seatOf: (state) => (state.turn === 'w' ? 'a' : 'b'),
+  },
+  chess960: {
+    type: 'chess960',
+    title: 'ჭადრაკი 960',
+    blurb: 'ფიგურები შემთხვევით რიგში — თეორია აღარ გეხმარება',
+    init: (rand = cryptoRand) => chess960.initState(rand),
+    seatOf: (state) => (state.turn === 'w' ? 'a' : 'b'),
+  },
+  gomoku: {
+    type: 'gomoku',
+    title: 'ხუთი რიგში',
+    blurb: '15×15 დაფა — ააწყვე ხუთი ქვა ერთ ხაზზე',
+    init: () => gomoku.initState(),
+    seatOf: (state) => state.turn,
   },
   checkers: {
     type: 'checkers',
@@ -90,7 +106,7 @@ export const GAMES = {
 export const seatsOf = (type) => GAMES[type]?.seats || 2
 export const SEAT_LETTERS = ['a', 'b', 'c', 'd']
 
-export const GAME_LIST = ['nardi', 'longnardi', 'joker', 'bura', 'durak', 'loto', 'chess', 'checkers', 'domino'].map((k) => GAMES[k])
+export const GAME_LIST = ['nardi', 'longnardi', 'joker', 'bura', 'durak', 'loto', 'chess', 'chess960', 'checkers', 'gomoku', 'domino'].map((k) => GAMES[k])
 
 // კრიპტოგრაფიულად სანდო შემთხვევითი რიცხვი [0, 1)
 export function cryptoRand() {
@@ -106,6 +122,15 @@ export function outcome(type, state) {
     const st = chess.status(chess.fromFEN(state.fen))
     if (!st.over) return { over: false, check: st.check }
     return { over: true, winner: st.winner ? (st.winner === 'w' ? 'a' : 'b') : null, result: st.result }
+  }
+  if (type === 'chess960') {
+    const st = chess960.status(chess.fromFEN(state.fen))
+    if (!st.over) return { over: false, check: st.check }
+    return { over: true, winner: st.winner ? (st.winner === 'w' ? 'a' : 'b') : null, result: st.result }
+  }
+  if (type === 'gomoku') {
+    if (!gomoku.isOver(state)) return { over: false }
+    return { over: true, winner: state.winner || null, result: state.winner ? 'five' : 'gomokudraw' }
   }
   if (type === 'checkers') {
     const st = checkers.status(state)
@@ -159,7 +184,9 @@ export const RESULT_TEXT = {
   loto: 'ბილეთი შეივსო',
   lotodraw: 'რამდენიმემ ერთდროულად შეავსო',
   timeout: 'დრო ამოიწურა',
+  five: 'ხუთი ქვა ერთ ხაზზე',
+  gomokudraw: 'დაფა შეივსო — ფრე',
   abort: 'თამაში არ დაწყებულა',
 }
 
-export { chess, checkers, nardi, domino, longnardi, durak, joker, bura, loto }
+export { chess, chess960, gomoku, checkers, nardi, domino, longnardi, durak, joker, bura, loto }
