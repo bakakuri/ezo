@@ -565,3 +565,69 @@ returns jsonb language sql stable as $$
     'age', public.age_of(dp.birth_date), 'gender', dp.gender, 'bio', dp.bio, 'photos', dp.photos,
     'interests', dp.interests, 'city', dp.city, 'last_seen', p.last_seen);
 $$;
+
+create or replace function public.dating_candidates(p_limit int default 20)
+returns setof jsonb language sql stable security definer set search_path = public as $$
+  with me as (select * from dating_profiles where user_id = auth.uid() and enabled)
+  select public.dating_card(dp, p)
+  from dating_profiles dp
+  join profiles p on p.id = dp.user_id
+  cross join me
+  where dp.enabled
+    and dp.user_id <> auth.uid()
+    and (me.looking_for = 'everyone' or me.looking_for = dp.gender)
+    and (dp.looking_for = 'everyone' or dp.looking_for = me.gender)
+    and public.age_of(dp.birth_date) between me.age_min and me.age_max
+    and not exists (select 1 from swipes s where s.swiper_id = auth.uid() and s.target_id = dp.user_id)
+    and not public.is_blocked(auth.uid(), dp.user_id)
+  order by (lower(dp.city) = lower(me.city)) desc, random()
+  limit p_limit;
+$$;
+
+-- Badoo-ს „ახლოს მყოფები“ — იგივე ქალაქი, ბოლოს აქტიურები პირველი
+create or replace function public.dating_nearby(p_limit int default 40)
+returns setof jsonb language sql stable security definer set search_path = public as $$
+  with me as (select * from dating_profiles where user_id = auth.uid() and enabled)
+  select public.dating_card(dp, p)
+  from dating_profiles dp
+  join profiles p on p.id = dp.user_id
+  cross join me
+  where dp.enabled and dp.user_id <> auth.uid()
+    and lower(dp.city) = lower(me.city)
+    and not public.is_blocked(auth.uid(), dp.user_id)
+  order by p.last_seen desc
+  limit p_limit;
+$$;
+
+create or replace function public.my_matches()
+returns table (id uuid, conversation_id uuid, created_at timestamptz, other jsonb)
+language sql stable security definer set search_path = public as $$
+  select m.id, m.conversation_id, m.created_at, public.dating_card(dp, p)
+  from matches m
+  join profiles p on p.id = case when m.user_a = auth.uid() then m.user_b else m.user_a end
+  left join dating_profiles dp on dp.user_id = p.id
+  where auth.uid() in (m.user_a, m.user_b)
+  order by m.created_at desc;
+$$;
+
+-- ---------------------------------------------------------------------
+-- სამაგიდო თამაშები
+-- ---------------------------------------------------------------------
+create table if not exists public.games (
+  id uuid primary key default gen_random_uuid(),
+  type text not null check (type in ('nardi', 'chess', 'checkers', 'domino')),
+  status text not null default 'waiting' check (status in ('waiting', 'active', 'finished', 'cancelled')),
+  is_public boolean not null default true,
+  player_a uuid not null references public.profiles on delete cascade,
+  player_b uuid references public.profiles on delete cascade,
+  invited uuid references public.profiles on delete cascade,
+  turn uuid,
+  state jsonb not null,
+  winner uuid,
+  result text,
+  move_no int not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists games_lobby_idx on public.games (type, status, created_at) where status = 'waiting';
+create index if not exists games_players_idx on public.games (player_a, player_b, updated_at desc);

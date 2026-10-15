@@ -1356,3 +1356,107 @@ a.level-chip:active { transform: scale(0.94); }
 .captcha > div:empty { display: none; }
 .captcha small { font-size: var(--t-xs); color: var(--ink-2); text-align: center; line-height: 1.45; }
 .captcha small.err { color: var(--accent); }
+
+/* ---------------- ეტაპი H: სეზონები და რეიტინგი ---------------- */
+.rboard { padding-bottom: 20px; scroll-margin-top: 70px; }
+.rboard-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px 2px; }
+.mini-seg { display: inline-flex; padding: 3px; border-radius: 999px; background: var(--bg-2); }
+.mini-seg button { padding: 6px 14px; border-radius: 999px; font-size: var(--t-sm); font-weight: 700; color: var(--ink-2); transition: background 0.2s, color 0.2s; }
+.mini-seg button.on { background: var(--ink); color: var(--bg); box-shadow: 0 1px 3px rgba(30, 16, 50, 0.18); }
+.season-card { margin: 12px 16px 6px; padding: 14px 16px 14px; border-radius: 20px; background: var(--surface); border: 1px solid var(--glass-line); box-shadow: var(--shadow-soft); position: relative; overflow: hidden; }
+.season-card::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 4px; background: var(--league); }
+.season-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.season-name { font-weight: 800; font-size: var(--t-md); }
+.season-left { font-size: var(--t-xs); font-weight: 700; color: var(--ink-3); white-space: nowrap; }
+.season-me { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.season-me .grow { display: grid; gap: 2px; min-width: 0; }
+.season-me b { font-size: var(--t-lg); font-weight: 900; font-variant-numeric: tabular-nums; }
+.season-me span { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.4; }
+.league-badge { flex: none; filter: drop-shadow(0 2px 4px rgba(30, 16, 50, 0.18)); }
+.season-progress { margin-top: 12px; display: grid; gap: 6px; }
+.season-progress .bar { height: 8px; border-radius: 99px; background: var(--bg-2); overflow: hidden; }
+.season-progress .bar i { display: block; height: 100%; border-radius: inherit; background: var(--league); transition: width 0.6s var(--ease-out); }
+.season-progress small { font-size: var(--t-xs); color: var(--ink-3); font-weight: 600; }
+.rboard-list { padding-top: 6px; }
+.leader-name { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.leader-name .ellipsis { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.leader .rt { display: inline-flex; align-items: center; gap: 6px; }
+.leader .rt .prov { color: var(--ink-3); }
+.rboard-gap { padding: 2px 16px; text-align: center; color: var(--ink-3); letter-spacing: 3px; }
+.champions { margin: 14px 16px 0; padding: 14px; border-radius: 20px; background: var(--grad-soft); }
+.champions h3 { font-size: var(--t-sm); font-weight: 800; margin-bottom: 10px; }
+.champ-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.champ { display: grid; justify-items: center; gap: 4px; min-width: 0; text-align: center; color: inherit; }
+.champ b { max-width: 100%; font-size: var(--t-sm); }
+.champ small { font-size: var(--t-xs); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.champ-ava { position: relative; }
+.champ .medal { position: absolute; right: -4px; bottom: -2px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; font-weight: 900; color: #fff; box-shadow: 0 0 0 2px var(--bg); }
+.champ.p1 .medal { background: #d4a21b; }
+.champ.p2 .medal { background: #8c97a6; }
+.champ.p3 .medal { background: #b4703a; }
+.rboard-note { margin: 12px 16px 0; font-size: var(--t-xs); line-height: 1.55; color: var(--ink-3); }
+
+/* ---------------- ეტაპი I: ჩატი — ძებნა, მიმაგრება, დადუმება, ქრებადი, გამოკითხვა ---------------- */
+.inbox-search { padding: 10px 16px 0; }
+.inbox-search .searchbox { margin-bottom: 6px; }
+.msg-results { display: grid; padding: 4px 0 16px; }
+.msg-result { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 16px; text-align: left; border-radius: 16px; }
+.msg-result:hover { background: var(--bg-2); }
+.msg-result .grow { display: grid; gap: 2px; min-width: 0; }
+.msg-result .top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.msg-result .top b { flex: 1; min-width: 0; }
+.msg-result time { flex: none; font-size: var(--t-xs); color: var(--ink-3); }
+.msg-result .snip { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.4; display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.msg-result mark, .chat-search-results mark { background: rgba(255, 196, 0, 0.42); color: inherit; border-radius: 3px; padding: 0 1px; }
+.inbox-row .row-flag { flex: none; color: var(--ink-3); align-self: center; }
+.inbox-row .row-pin { flex: none; color: var(--ink-3); align-self: center; transform: rotate(35deg); }
+.inbox-row.muted .unread-dot { background: var(--ink-3); }
+.inbox-row.muted.unread .last { font-weight: 500; color: var(--ink-2); }
+.inbox-hint { margin: 10px 16px 24px; font-size: var(--t-xs); color: var(--ink-3); text-align: center; }
+.menu button .grow { display: grid; gap: 1px; text-align: left; min-width: 0; }
+.menu button .grow small { font-size: var(--t-xs); font-weight: 500; color: var(--ink-3); }
+.sheet-note { margin: 0 16px 10px; font-size: var(--t-sm); line-height: 1.5; color: var(--ink-2); }
+.choice-list { display: grid; gap: 6px; padding: 0 16px calc(18px + var(--safe-b)); }
+.choice-list button { display: flex; align-items: center; gap: 12px; padding: 13px 14px; border-radius: 16px; border: 1px solid var(--line); background: var(--surface); font-weight: 700; text-align: left; }
+.choice-list button.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.choice-list button:disabled { opacity: 0.55; }
+.radio-dot { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--ink-3); }
+.choice-list button.on .radio-dot { border: 6px solid var(--accent); }
+.chat-search-bar { gap: 8px; }
+.chat-search-bar .searchbox { min-width: 0; }
+.chat-search-results { max-height: 55vh; overflow-y: auto; background: var(--sheet-bg); border-bottom: 1px solid var(--line); box-shadow: var(--shadow-soft); }
+.disappear-pill { align-self: center; display: inline-flex; align-items: center; gap: 6px; margin: 8px auto 0; padding: 5px 12px; border-radius: 999px; background: var(--bg-2); font-size: var(--t-xs); font-weight: 700; color: var(--ink-2); }
+.bubble-time svg { vertical-align: -2px; margin-right: 3px; opacity: 0.8; }
+.to-latest { position: absolute; left: 50%; bottom: calc(76px + var(--safe-b)); transform: translateX(-50%); z-index: 5; display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 999px; background: var(--ink); color: var(--bg); font-size: var(--t-sm); font-weight: 700; box-shadow: var(--shadow-pop); }
+.to-latest .flip-down { transform: rotate(180deg); }
+.chat { position: relative; }
+.msg-row.flash .bubble { animation: msg-flash 1.6s ease-out; }
+@keyframes msg-flash { 0%, 30% { box-shadow: 0 0 0 4px rgba(255, 196, 0, 0.75); } 100% { box-shadow: 0 0 0 0 rgba(255, 196, 0, 0); } }
+@media (prefers-reduced-motion: reduce) { .msg-row.flash .bubble { animation: none; outline: 3px solid rgba(255, 196, 0, 0.75); } }
+
+.bubble.poll { min-width: min(280px, 78vw); }
+.poll-msg { display: grid; gap: 8px; }
+.poll-kind { display: inline-flex; align-items: center; gap: 5px; font-size: var(--t-xs); font-weight: 700; opacity: 0.75; }
+.poll-q { font-size: var(--t-md); line-height: 1.35; }
+.poll-opts { display: grid; gap: 6px; }
+.poll-opt { position: relative; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 8px 12px; border-radius: 14px; overflow: hidden; text-align: left; color: inherit;
+  background: color-mix(in srgb, currentColor 9%, transparent); border: 1px solid color-mix(in srgb, currentColor 16%, transparent); }
+.poll-opt .fill { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, currentColor 16%, transparent); transition: width 0.5s var(--ease-out); }
+.poll-opt.lead .fill { background: color-mix(in srgb, currentColor 26%, transparent); }
+.poll-opt > :not(.fill) { position: relative; }
+.poll-opt .mark { flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 2px solid currentColor; opacity: 0.85; }
+.poll-opt .mark.sq { border-radius: 6px; }
+.poll-opt.on .mark { background: currentColor; }
+.poll-opt.on .mark svg { color: var(--accent); }
+.bubble.them .poll-opt.on .mark svg { color: var(--bg); }
+.poll-opt .txt { flex: 1; min-width: 0; font-weight: 600; font-size: var(--t-sm); line-height: 1.35; }
+.poll-opt .pct { flex: none; font-size: var(--t-xs); font-weight: 800; font-variant-numeric: tabular-nums; }
+.poll-total { font-size: var(--t-xs); opacity: 0.75; }
+.poll-compose .poll-opt-row { gap: 6px; margin-bottom: 6px; }
+.poll-compose .add-opt { justify-self: start; gap: 6px; }
+.bubble.them .poll-opt { background: var(--bg-2); border-color: var(--line); }
+.bubble.them .poll-opt .fill { background: var(--accent-soft); }
+.bubble.them .poll-opt.lead .fill { background: rgba(223, 31, 82, 0.2); }
+.bubble.them .poll-opt .mark { border-color: var(--ink-3); }
+.bubble.them .poll-opt.on .mark { background: var(--accent); border-color: var(--accent); }
+.bubble.them .poll-opt.on .mark svg { color: #fff; }

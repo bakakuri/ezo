@@ -107,7 +107,7 @@ alter table public.notifications drop constraint if exists notifications_type_ch
 alter table public.notifications add constraint notifications_type_check check (type in (
   'like', 'reply', 'follow', 'gift', 'match', 'game_invite', 'quote',
   'group_request', 'group_approved', 'event_rsvp', 'tournament_start', 'tournament_end',
-  'follow_request', 'follow_accept', 'listing_price', 'achievement', 'level_up', 'invite_joined', 'mention'));
+  'follow_request', 'follow_accept', 'listing_price', 'achievement', 'level_up', 'invite_joined', 'mention', 'season_end'));
 
 create or replace function public.extract_mentions(t text)
 returns text[] language sql immutable as $$
@@ -141,63 +141,7 @@ create trigger posts_mentions after insert or update of body on public.posts
   for each row execute function public.on_post_mentions();
 revoke execute on function public.on_post_mentions() from public, anon, authenticated;
 
--- მოხსენიების Push „პასუხების“ კატეგორიაშია
-create or replace function public.push_category(p_payload jsonb)
-returns text language sql immutable as $$
-  select case
-    when p_payload ->> 'tag' like 'conv-%' then 'messages'
-    when p_payload ->> 'tag' like 'call-%' then 'calls'
-    when p_payload ->> 'tag' like 'game-%' then 'games'
-    when p_payload ->> 'tag' ~ '^n-(reply|quote|mention)-' then 'replies'
-    when p_payload ->> 'tag' ~ '^n-like-' then 'likes'
-    when p_payload ->> 'tag' ~ '^n-(follow|follow_request|follow_accept|invite_joined)-' then 'follows'
-    when p_payload ->> 'tag' ~ '^n-(game_invite|tournament_start|tournament_end)-' then 'games'
-    when p_payload ->> 'tag' ~ '^n-match-' then 'dating'
-    when p_payload ->> 'tag' ~ '^n-listing_price-' then 'market'
-    when p_payload ->> 'tag' ~ '^n-(group_request|group_approved|event_rsvp)-' then 'groups'
-    when p_payload ->> 'tag' ~ '^n-(gift|achievement|level_up)-' then 'rewards'
-    else 'other' end;
-$$;
-
--- Push-ის ტექსტები ყველა ტიპისთვის (მოხსენიების ჩათვლით)
-create or replace function public.on_notification_push()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_actor text; v_group text; v_event text;
-begin
-  select coalesce(nullif(full_name, ''), username) into v_actor from profiles where id = new.actor_id;
-  select name into v_group from groups where id = new.group_id;
-  select title into v_event from events where id = new.event_id;
-  perform public.push_dispatch(new.user_id, jsonb_build_object(
-    'title', case when new.type like 'tournament%' or new.type = 'listing_price' then coalesce(new.data ->> 'title', 'ეზო') else coalesce(v_actor, 'ეზო') end,
-    'body', case new.type
-      when 'tournament_start' then 'ტურნირი დაიწყო — შემოდი და ითამაშე'
-      when 'tournament_end' then case when (new.data ->> 'place')::int = 1 then '🏆 გაიმარჯვე ტურნირში!'
-        else 'ტურნირი დასრულდა. შენი ადგილი: მე-' || (new.data ->> 'place') || ' (' || (new.data ->> 'players') || '-დან)' end
-      when 'like' then 'მოიწონა შენი პოსტი' when 'reply' then 'გიპასუხა' when 'quote' then 'გაგიზიარა ციტატით'
-      when 'mention' then 'მოგიხსენია: ' || coalesce(left((select body from posts where id = new.post_id), 100), '')
-      when 'follow' then 'გამოგიწერა' when 'gift' then 'საჩუქარი გამოგიგზავნა'
-      when 'follow_request' then 'გამოწერას გთხოვს' when 'follow_accept' then 'დაგიდასტურა გამოწერა'
-      when 'achievement' then 'ახალი მიღწევა: ' || coalesce((select title from badges where key = new.data ->> 'badge'), '') || ' (+' || (new.data ->> 'coins') || ' ბროწეული)'
-      when 'invite_joined' then 'შენი მოწვევით შემოგვიერთდა 🎉 +20 ბროწეული'
-      when 'level_up' then 'ახალი დონე: ' || (new.data ->> 'level') || '! +' || (new.data ->> 'coins') || ' ბროწეული'
-      when 'listing_price' then 'შენახულ განცხადებას ფასი დაუკლეს: ' || public.price_text((new.data ->> 'price')::numeric, new.data ->> 'currency')
-      when 'match' then 'თქვენ ერთმანეთი მოიწონეთ!' when 'game_invite' then 'თამაშში გეპატიჟება'
-      when 'group_request' then 'ითხოვს გაწევრიანებას: ' || coalesce(v_group, 'ჯგუფი')
-      when 'group_approved' then 'მიგიღეს ჯგუფში: ' || coalesce(v_group, '')
-      when 'event_rsvp' then 'მოდის: ' || coalesce(v_event, 'შენს ივენთზე')
-      else 'ახალი შეტყობინება' end,
-    'url', case when new.type = 'game_invite' and new.game_id is not null then '/g/' || new.game_id
-                when new.tournament_id is not null then '/t/' || new.tournament_id
-                when new.type = 'match' then '/dating?tab=matches'
-                when new.type = 'follow_request' then '/requests'
-                when new.type = 'listing_price' then '/market/' || (new.data ->> 'listing_id')
-                when new.type in ('achievement', 'level_up') then '/rewards'
-                when new.group_id is not null then '/groups/' || (select slug from groups where id = new.group_id)
-                when new.event_id is not null then '/events/' || new.event_id
-                when new.post_id is not null then '/p/' || new.post_id else '/notifications' end,
-    'tag', 'n-' || new.type || '-' || coalesce(new.post_id::text, new.group_id::text, new.tournament_id::text, new.data ->> 'listing_id', new.actor_id::text, '')));
-  return new;
-end $$;
+-- მოხსენიების Push „პასუხების“ კატეგორიაშია; Push-ის ტექსტები და კატეგორიები — ეტაპი H-ში (push_category, on_notification_push)
 
 -- ---- ბმულის ბარათი: { url, title, description, image, site } — ავტორი ამატებს გამოქვეყნებისას (api/unfurl.js)
 alter table public.posts add column if not exists link jsonb;

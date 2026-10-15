@@ -349,6 +349,57 @@ await step('anon: keep_alive', async () => {
   must(!denied.ok, 'anon can call media_cleanup_take')
 })
 
+// ---- ეტაპი H: სეზონი, მეგობრები, საერთო რეიტინგი
+await step('H: season board, friends scope, all-time board', async () => {
+  const t = sql(`select type from public.game_stats where user_id = '${pa.id}' and wins + losses + draws > 0 order by type limit 1`)
+  must(t, 'A has no rated games in this run')
+  must(Number(sql(`select count(*) from public.season_stats where user_id = '${pa.id}' and type = '${t}'`)) === 1, 'season row missing')
+  const s = await A.gameBoard(t, 'season', 'all')
+  must(s.season && Date.parse(s.ends_at) > Date.now() && s.me?.user_id === pa.id && s.me.league && s.me.pos >= 1, 'season ' + JSON.stringify(s).slice(0, 240))
+  const f = await A.gameBoard(t, 'season', 'friends')
+  must(f.rows.length >= 1 && f.rows.every((r) => [pa.id, pb.id].includes(r.user_id)), 'friends ' + JSON.stringify(f.rows.map((r) => r.user_id)))
+  const all = await A.gameBoard(t, 'all', 'all')
+  must(all.rows.length >= 1 && all.rows.every((r) => r.league === null) && all.me?.rating === Number(sql(`select rating from public.game_stats where user_id = '${pa.id}' and type = '${t}'`)), 'all-time')
+  await Guest.gameBoard(t).then((r) => must(r === null, 'guest got a board'), () => {})
+})
+
+// ---- ეტაპი I: ჩატი — ძებნა, მიმაგრება/დადუმება, ქრებადი მესიჯები, გამოკითხვა
+await step('I: search, pin, mute, disappearing, around', async () => {
+  const dm = await A.openDM(pb.id)
+  const m1 = await A.send(dm, { body: `ხვალ ნარდი ${RUN}` })
+  const found = await B.searchMessages(`nardi ${RUN}`)
+  must(found.some((r) => r.id === m1.id && r.conversation_id === dm), 'latin search did not find Georgian text')
+  must((await B.searchMessages(`nardi ${RUN}`, dm)).length >= 1 && (await C.searchMessages?.(`nardi ${RUN}`).catch(() => []) || []).length === 0, 'conv filter / outsider')
+  const p = await A.setChatPrefs(dm, { pin: true, muteHours: 8 })
+  must(p.pinned && p.muted && !p.mute_forever, 'prefs ' + JSON.stringify(p))
+  const first = (await A.conversations())[0]
+  must(first.id === dm && first.pinned && first.muted, 'pinned not first')
+  must((await A.unreadCounts()).messages >= 0, 'unread counts')
+  await A.setChatPrefs(dm, { pin: false, muteHours: 0 })
+  await B.setDisappearing(dm, 24)
+  must((await A.conversation(dm)).disappear_hours === 24, 'disappear not set')
+  const m2 = await A.send(dm, { body: 'გაქრება' })
+  must(m2.expires_at && Date.parse(m2.expires_at) > Date.now() + 23 * 3600e3, 'expires_at ' + m2.expires_at)
+  sql(`update public.messages set expires_at = now() - interval '1 minute' where id = '${m2.id}'`)
+  must(!(await B.messages(dm)).some((m) => m.id === m2.id), 'expired message visible')
+  await B.setDisappearing(dm, null)
+  const around = await B.messages(dm, { around: m1.id })
+  must(around.some((m) => m.id === m1.id) && around.hasNewer === false, 'around')
+})
+await step('I: group poll — create, vote, change, multi rules, realtime row', async () => {
+  const g = await A.createGroupChat('გამოკითხვა ' + RUN, [pb.id])
+  const poll = await A.sendChatPoll(g, { question: 'როდის?', options: ['ხვალ', 'ზეგ'], multi: false })
+  must(poll.meta?.poll?.options?.length === 2, 'poll meta')
+  await B.voteChatPoll(poll.id, [1])
+  await B.voteChatPoll(poll.id, [0])
+  await B.voteChatPoll(poll.id, [0, 1]).then(() => { throw new Error('multi on single poll') }, () => {})
+  const votes = await A.chatPollVotes(g)
+  must(votes.length === 1 && votes[0].option === 0 && votes[0].user_id === pb.id, 'votes ' + JSON.stringify(votes))
+  const dm = await A.openDM(pb.id)
+  await A.sendChatPoll(dm, { question: 'x', options: ['a', 'b'] }).then(() => { throw new Error('poll in DM') }, () => {})
+  must((await A.conversations()).find((c) => c.id === g).last_message.startsWith('📊'), 'poll preview')
+})
+
 // ---- საჯარო ფუნქციები anon გასაღებით (Vercel-ის og.js და sitemap.js ასე იძახებს)
 await step('anon: og_preview + sitemap_entries', async () => {
   const keys = Object.fromEntries(readFileSync(`${OUT}/keys.env`, 'utf8').trim().split('\n').map((l) => l.split('=')))

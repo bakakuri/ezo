@@ -1,71 +1,5 @@
 -- ეზო — სქემის ნაწილი 2/8. გაუშვი 1-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.dating_candidates(p_limit int default 20)
-returns setof jsonb language sql stable security definer set search_path = public as $$
-  with me as (select * from dating_profiles where user_id = auth.uid() and enabled)
-  select public.dating_card(dp, p)
-  from dating_profiles dp
-  join profiles p on p.id = dp.user_id
-  cross join me
-  where dp.enabled
-    and dp.user_id <> auth.uid()
-    and (me.looking_for = 'everyone' or me.looking_for = dp.gender)
-    and (dp.looking_for = 'everyone' or dp.looking_for = me.gender)
-    and public.age_of(dp.birth_date) between me.age_min and me.age_max
-    and not exists (select 1 from swipes s where s.swiper_id = auth.uid() and s.target_id = dp.user_id)
-    and not public.is_blocked(auth.uid(), dp.user_id)
-  order by (lower(dp.city) = lower(me.city)) desc, random()
-  limit p_limit;
-$$;
-
--- Badoo-ს „ახლოს მყოფები“ — იგივე ქალაქი, ბოლოს აქტიურები პირველი
-create or replace function public.dating_nearby(p_limit int default 40)
-returns setof jsonb language sql stable security definer set search_path = public as $$
-  with me as (select * from dating_profiles where user_id = auth.uid() and enabled)
-  select public.dating_card(dp, p)
-  from dating_profiles dp
-  join profiles p on p.id = dp.user_id
-  cross join me
-  where dp.enabled and dp.user_id <> auth.uid()
-    and lower(dp.city) = lower(me.city)
-    and not public.is_blocked(auth.uid(), dp.user_id)
-  order by p.last_seen desc
-  limit p_limit;
-$$;
-
-create or replace function public.my_matches()
-returns table (id uuid, conversation_id uuid, created_at timestamptz, other jsonb)
-language sql stable security definer set search_path = public as $$
-  select m.id, m.conversation_id, m.created_at, public.dating_card(dp, p)
-  from matches m
-  join profiles p on p.id = case when m.user_a = auth.uid() then m.user_b else m.user_a end
-  left join dating_profiles dp on dp.user_id = p.id
-  where auth.uid() in (m.user_a, m.user_b)
-  order by m.created_at desc;
-$$;
-
--- ---------------------------------------------------------------------
--- სამაგიდო თამაშები
--- ---------------------------------------------------------------------
-create table if not exists public.games (
-  id uuid primary key default gen_random_uuid(),
-  type text not null check (type in ('nardi', 'chess', 'checkers', 'domino')),
-  status text not null default 'waiting' check (status in ('waiting', 'active', 'finished', 'cancelled')),
-  is_public boolean not null default true,
-  player_a uuid not null references public.profiles on delete cascade,
-  player_b uuid references public.profiles on delete cascade,
-  invited uuid references public.profiles on delete cascade,
-  turn uuid,
-  state jsonb not null,
-  winner uuid,
-  result text,
-  move_no int not null default 0,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-create index if not exists games_lobby_idx on public.games (type, status, created_at) where status = 'waiting';
-create index if not exists games_players_idx on public.games (player_a, player_b, updated_at desc);
-
 -- v5: 4-ადგილიანი მაგიდები (ჯოკერი), ბლიცი, ტურნირები
 alter table public.games add column if not exists seats int not null default 2;
 alter table public.games add column if not exists player_c uuid references public.profiles on delete cascade;
@@ -261,7 +195,7 @@ alter table public.notifications drop constraint if exists notifications_type_ch
 alter table public.notifications add constraint notifications_type_check check (type in (
   'like', 'reply', 'follow', 'gift', 'match', 'game_invite', 'quote',
   'group_request', 'group_approved', 'event_rsvp', 'tournament_start', 'tournament_end',
-  'follow_request', 'follow_accept', 'listing_price', 'achievement', 'level_up', 'invite_joined'));
+  'follow_request', 'follow_accept', 'listing_price', 'achievement', 'level_up', 'invite_joined', 'mention', 'season_end'));
 
 -- ---------------------------------------------------------------------
 -- ფიდები: „შენთვის“ (რეიტინგით) და „გამოწერები“ (ქრონოლოგიით)
@@ -494,3 +428,132 @@ end $$;
 drop trigger if exists reports_after_insert on public.reports;
 create trigger reports_after_insert after insert on public.reports
   for each row execute function public.on_report();
+
+-- ერთი სამიზნე = ერთი რიგი: პოსტი, განცხადება ან პროფილი
+create or replace function public.report_key(p_post uuid, p_listing uuid, p_user uuid)
+returns text language sql immutable as $$
+  select coalesce('p:' || p_post::text, 'l:' || p_listing::text, 'u:' || p_user::text);
+$$;
+drop function if exists public.admin_reports(text);
+create or replace function public.admin_reports(p_status text default 'open')
+returns table (id uuid, category text, reason text, status text, action text, created_at timestamptz,
+               reports_count bigint, reporter jsonb, target_user jsonb, target_post jsonb, target_listing jsonb)
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  return query
+  with latest as (
+    select distinct on (public.report_key(r.target_post, r.target_listing, r.target_user)) r.*
+    from reports r
+    where r.status = p_status
+    order by public.report_key(r.target_post, r.target_listing, r.target_user), r.created_at desc
+  )
+  select l.id, l.category, l.reason, l.status, l.action, l.created_at,
+    (select count(distinct r2.reporter_id) from reports r2 where r2.status = p_status and public.report_key(r2.target_post, r2.target_listing, r2.target_user) = public.report_key(l.target_post, l.target_listing, l.target_user)),
+    (select jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url)
+       from profiles p where p.id = l.reporter_id),
+    (select jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url,
+             'banned_until', p.banned_until, 'role', p.role)
+       from profiles p where p.id = coalesce(l.target_user, (select x.author_id from posts x where x.id = l.target_post),
+                                              (select x.seller_id from listings x where x.id = l.target_listing))),
+    (select jsonb_build_object('id', x.id, 'body', x.body, 'media', x.media, 'hidden', x.hidden, 'kind', x.kind, 'created_at', x.created_at)
+       from posts x where x.id = l.target_post),
+    (select jsonb_build_object('id', x.id, 'title', x.title, 'price', x.price, 'currency', x.currency, 'photo', x.photos ->> 0,
+             'description', left(x.description, 300), 'hidden', x.hidden, 'created_at', x.created_at)
+       from listings x where x.id = l.target_listing)
+  from latest l
+  order by l.created_at desc
+  limit 200;
+end $$;
+
+-- p_action: 'dismiss' | 'hide_post' | 'delete_post' | 'hide_listing' | 'delete_listing' | 'ban'   (ban: p_days = null → სამუდამოდ)
+create or replace function public.admin_resolve(p_report uuid, p_action text, p_days int default null, p_note text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare r reports; v_target uuid; v_key text;
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  select * into r from reports where id = p_report;
+  if not found then raise exception 'not found'; end if;
+  v_key := public.report_key(r.target_post, r.target_listing, r.target_user);
+  v_target := coalesce(r.target_user, (select author_id from posts where id = r.target_post),
+                       (select seller_id from listings where id = r.target_listing));
+  if p_action = 'hide_post' and r.target_post is not null then
+    update posts set hidden = true where id = r.target_post;
+  elsif p_action = 'delete_post' and r.target_post is not null then
+    delete from posts where id = r.target_post;
+  elsif p_action = 'hide_listing' and r.target_listing is not null then
+    update listings set hidden = true where id = r.target_listing;
+  elsif p_action = 'delete_listing' and r.target_listing is not null then
+    delete from listings where id = r.target_listing;
+  elsif p_action = 'ban' and v_target is not null then
+    perform public.admin_ban(v_target, p_days, coalesce(p_note, r.category));
+  end if;
+  update reports x set status = case when p_action = 'dismiss' then 'dismissed' else 'resolved' end,
+         action = p_action, resolved_by = auth.uid(), resolved_at = now()
+   where x.status = 'open' and public.report_key(x.target_post, x.target_listing, x.target_user) = v_key;
+end $$;
+
+create or replace function public.admin_ban(p_user uuid, p_days int default null, p_note text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  if (select role from profiles where id = p_user) in ('moderator', 'admin') then raise exception 'მოდერატორს ვერ დაბლოკავ'; end if;
+  update profiles set
+    banned_until = case when p_days is null then 'infinity'::timestamptz else now() + make_interval(days => p_days) end,
+    ban_reason = p_note
+   where id = p_user;
+  update dating_profiles set enabled = false where user_id = p_user;
+end $$;
+
+create or replace function public.admin_unban(p_user uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  update profiles set banned_until = null, ban_reason = null where id = p_user;
+end $$;
+
+create or replace function public.admin_stats()
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  return jsonb_build_object(
+    'users', (select count(*) from profiles where onboarded),
+    'new_users_7d', (select count(*) from profiles where created_at > now() - interval '7 days'),
+    'posts_24h', (select count(*) from posts where created_at > now() - interval '24 hours'),
+    'open_reports', (select count(distinct public.report_key(r.target_post, r.target_listing, r.target_user)) from reports r where status = 'open'),
+    'banned', (select count(*) from profiles where banned_until > now()),
+    'active_games', (select count(*) from games where status = 'active'));
+end $$;
+
+-- ---------------------------------------------------------------------
+-- Push შეტყობინებები (Web Push). ჩართვა — იხ. README, „Push შეტყობინებები“.
+-- ---------------------------------------------------------------------
+do $$ begin
+  create extension if not exists pg_net;
+exception when others then raise notice 'pg_net მიუწვდომელია — push არ იმუშავებს';
+end $$;
+
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles on delete cascade,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  user_agent text,
+  created_at timestamptz not null default now()
+);
+create index if not exists push_subs_user_idx on public.push_subscriptions (user_id);
+
+-- სერვერის საიდუმლოებები (Edge Function-ის მისამართი და გასაღები). კლიენტს წვდომა არ აქვს.
+create table if not exists public.app_secrets (
+  key text primary key,
+  value text not null
+);
+
+-- push_dispatch (Push-ის გაგზავნა) ფაილის ბოლოსაა — ეტაპი D (შეტყობინებების პარამეტრებით)
+
+create or replace function public.game_title(p_type text)
+returns text language sql immutable as $$
+  select case p_type when 'nardi' then 'ნარდი' when 'longnardi' then 'გრძელი ნარდი' when 'chess' then 'ჭადრაკი'
+    when 'checkers' then 'შაშკი' when 'domino' then 'დომინო' when 'durak' then 'დურაკი' when 'joker' then 'ჯოკერი' else p_type end;
+$$;

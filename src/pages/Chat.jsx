@@ -10,6 +10,7 @@ import { compressImage } from '../lib/media.js'
 import { useToast } from '../components/Toast.jsx'
 import { ListingChatCard } from '../components/Listing.jsx'
 import { useCalls } from '../components/Call.jsx'
+import { ChatPrefsSheet, PollComposer, PollBubble, SearchResults, DISAPPEAR_LABEL, muteText } from '../components/ChatExtras.jsx'
 
 const REACTIONS = ['❤️', '😂', '😮', '😢', '👍', '🔥']
 
@@ -30,18 +31,47 @@ export function Inbox() {
   const [list, setList] = useState(null)
   const [filter, setFilter] = useState('all')
   const [creating, setCreating] = useState(false)
+  const [prefsFor, setPrefsFor] = useState(null)
+  const [search, setSearch] = useState(null) // { q, results }
   const { me } = useAuth()
+  const load = () => api.conversations().then(setList).catch(() => setList([]))
   useEffect(() => {
-    const load = () => api.conversations().then(setList).catch(() => setList([]))
     load()
     return api.subscribeNotifications(load)
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // ძებნა ყველა ჩატში (300 მწ პაუზით)
+  useEffect(() => {
+    if (!search || search.q.trim().length < 2) return
+    let live = true
+    const t = setTimeout(() => api.searchMessages(search.q).then((r) => { if (live) setSearch((s) => (s ? { ...s, results: r } : s)) }).catch(() => {}), 300)
+    return () => { live = false; clearTimeout(t) }
+  }, [search?.q]) // eslint-disable-line react-hooks/exhaustive-deps
+  const press = useRef(0)
+  const rowPress = (c) => ({
+    onPointerDown: () => { clearTimeout(press.current); press.current = setTimeout(() => setPrefsFor(c), 480) },
+    onPointerUp: () => clearTimeout(press.current),
+    onPointerLeave: () => clearTimeout(press.current),
+    onPointerCancel: () => clearTimeout(press.current),
+    onContextMenu: (e) => { e.preventDefault(); clearTimeout(press.current); setPrefsFor(c) },
+    onClickCapture: (e) => { if (prefsFor) e.preventDefault() },
+  })
   const shown = list?.filter((c) => filter === 'all' || (filter === 'unread' ? c.unread : filter === 'groups' ? c.kind === 'group' : c.kind === 'dating'))
   return (
     <>
       <TopBar title="მესიჯები" backTo="/">
+        <button className="icon-btn" onClick={() => setSearch(search ? null : { q: '', results: null })} aria-label="მესიჯებში ძებნა" aria-pressed={Boolean(search)}><Icon name={search ? 'close' : 'search'} /></button>
         <button className="icon-btn" onClick={() => setCreating(true)} aria-label="ჯგუფური ჩატი"><Icon name="userPlus" /></button>
       </TopBar>
+      {search && (
+        <div className="inbox-search">
+          <div className="searchbox"><Icon name="search" size={19} />
+            <input className="input" type="search" autoFocus placeholder="მესიჯებში ძებნა" aria-label="მესიჯებში ძებნა" value={search.q}
+              onChange={(e) => setSearch({ q: e.target.value, results: e.target.value.trim().length < 2 ? [] : null })} />
+          </div>
+          <SearchResults results={search.results} q={search.q} onPick={(r) => navigate(`/chat/${r.conversation_id}?m=${r.id}`)} />
+        </div>
+      )}
+      {!search && <>
       <div className="chips" style={{ padding: '10px 16px 6px' }}>
         {[['all', 'ყველა'], ['unread', 'წაუკითხავი'], ['groups', 'ჯგუფები'], ['dating', 'გაცნობა']].map(([k, l]) => (
           <button key={k} className={`chip${filter === k ? ' on' : ''}`} onClick={() => setFilter(k)}>{l}</button>
@@ -50,12 +80,15 @@ export function Inbox() {
       {list === null && <Loader />}
       {shown?.length === 0 && <Empty icon="chat" title="მესიჯები ჯერ არ არის" text="მისწერე მეგობარს მის პროფილიდან ან შექმენი ჯგუფური ჩატი." action={<button className="btn btn-primary" onClick={() => setCreating(true)}>ჯგუფური ჩატი</button>} />}
       {shown?.map((c) => (
-        <Link key={c.id} to={`/chat/${c.id}`} className={`inbox-row${c.unread ? ' unread' : ''}`}>
+        <Link key={c.id} to={`/chat/${c.id}`} className={`inbox-row${c.unread ? ' unread' : ''}${c.muted ? ' muted' : ''}`} {...rowPress(c)}>
           <ConvAvatar c={c} />
           <div className="who">
             <div className="top">
               <b>{convName(c)}</b>
+              {c.muted && <Icon name="bellOff" size={15} className="row-flag" title={muteText(c)} />}
+              {c.disappear_hours && <Icon name="timer" size={15} className="row-flag" title={`ქრებადი მესიჯები: ${DISAPPEAR_LABEL[c.disappear_hours]}`} />}
               {c.kind === 'dating' && <span className="tag-dating">გაცნობა</span>}
+              {c.pinned && <Icon name="pushpin" size={15} className="row-pin" title="მიმაგრებული" />}
               <time>{timeAgo(c.updated_at)}</time>
             </div>
             <div className="last">
@@ -66,6 +99,9 @@ export function Inbox() {
           {c.unread && <span className="unread-dot" aria-label="წაუკითხავი" />}
         </Link>
       ))}
+      {list?.length > 0 && <p className="inbox-hint">ჩატზე ხანგრძლივი შეხება — მიმაგრება, დადუმება, ქრებადი მესიჯები.</p>}
+      </>}
+      {prefsFor && <ChatPrefsSheet conv={prefsFor} title={convName(prefsFor)} onClose={() => setPrefsFor(null)} onChanged={load} />}
       {creating && <PeoplePicker title="ახალი ჯგუფური ჩატი" withTitle onClose={() => setCreating(false)} onDone={async (ids, title) => {
         const id = await api.createGroupChat(title, ids)
         setCreating(false)
@@ -144,6 +180,13 @@ export function ChatRoom({ id }) {
   const [recTime, setRecTime] = useState(0)
   const [menu, setMenu] = useState(null) // message
   const [info, setInfo] = useState(false)
+  const [prefs, setPrefs] = useState(false)
+  const [pollOpen, setPollOpen] = useState(false)
+  const [votes, setVotes] = useState([])
+  const [search, setSearch] = useState(null) // { q, results }
+  const [detached, setDetached] = useState(false) // ძებნიდან ძველ მესიჯებთან ვართ
+  const skipScroll = useRef(false)
+  const [, setTick] = useState(0)
   const scroller = useRef(null)
   const fileRef = useRef(null)
   const inputRef = useRef(null)
@@ -155,7 +198,14 @@ export function ChatRoom({ id }) {
       setConv(c)
       if (c?.kind === 'group') api.chatMembers(id).then(setMembers).catch(() => {})
     }).catch(() => setConv(null))
-    api.messages(id).then(setMsgs).catch(() => setMsgs([]))
+    // ?m= — ძებნიდან: ამ მესიჯის გარშემო
+    const target = new URLSearchParams(location.search).get('m')
+    if (target) {
+      history.replaceState(history.state, '', location.pathname)
+      skipScroll.current = true
+      api.messages(id, { around: target }).then((l) => { setMsgs(l); setDetached(Boolean(l.hasNewer)); flashTo(target) }).catch(() => setMsgs([]))
+    } else api.messages(id).then(setMsgs).catch(() => setMsgs([]))
+    api.chatPollVotes(id).then(setVotes).catch(() => {})
     api.markRead(id).then(unread.refresh)
     const off1 = api.subscribeMessages(id, (ev) => {
       if (ev.kind === 'message:new') {
@@ -165,12 +215,17 @@ export function ChatRoom({ id }) {
           return [...cur, { ...ev.row, reactions: ev.row.reactions || [], reply: reply ? { id: reply.id, body: reply.body, sender_id: reply.sender_id, media_type: reply.media_type, deleted_at: reply.deleted_at } : null }]
         })
         if (ev.row.sender_id !== me?.id) api.markRead(id)
+        if (ev.row.meta && 'disappear' in ev.row.meta) api.conversation(id).then(setConv).catch(() => {})
       } else if (ev.kind === 'message:update') {
         setMsgs((cur) => cur?.map((x) => (x.id === ev.row.id ? { ...x, ...ev.row, reactions: x.reactions, reply: x.reply } : x)))
       } else if (ev.kind === 'reaction:set') {
         setMsgs((cur) => cur?.map((x) => (x.id === ev.row.message_id ? { ...x, reactions: [...(x.reactions || []).filter((r) => r.user_id !== ev.row.user_id), { user_id: ev.row.user_id, emoji: ev.row.emoji }] } : x)))
       } else if (ev.kind === 'reaction:remove') {
         setMsgs((cur) => cur?.map((x) => (x.id === ev.row.message_id ? { ...x, reactions: (x.reactions || []).filter((r) => r.user_id !== ev.row.user_id) } : x)))
+      } else if (ev.kind === 'poll:vote') {
+        setVotes((cur) => (cur.some((v) => v.message_id === ev.row.message_id && v.user_id === ev.row.user_id && v.option === ev.row.option) ? cur : [...cur, ev.row]))
+      } else if (ev.kind === 'poll:unvote') {
+        setVotes((cur) => cur.filter((v) => !(v.message_id === ev.row.message_id && v.user_id === ev.row.user_id && v.option === ev.row.option)))
       }
     })
     const off2 = api.subscribeTyping?.(id, setTyping)
@@ -178,9 +233,58 @@ export function ChatRoom({ id }) {
   }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useLayoutEffect(() => {
+    if (skipScroll.current) { skipScroll.current = false; return }
     const el = scroller.current
     if (el) el.scrollTop = el.scrollHeight
   }, [msgs?.length, typing])
+
+  // ქრებადი მესიჯები: ვადაგასულს ეკრანიდანაც ვაქრობთ (ყოველ 20 წამში ვამოწმებთ)
+  const hasExpiring = msgs?.some((m) => m.expires_at)
+  useEffect(() => {
+    if (!hasExpiring) return
+    const t = setInterval(() => setTick((x) => x + 1), 20000)
+    return () => clearInterval(t)
+  }, [hasExpiring])
+  const visible = msgs?.filter((m) => !m.expires_at || Date.parse(m.expires_at) > Date.now())
+
+  // ძებნა ამ ჩატში
+  useEffect(() => {
+    if (!search || search.q.trim().length < 2) return
+    let live = true
+    const t = setTimeout(() => api.searchMessages(search.q, id).then((r) => { if (live) setSearch((s) => (s ? { ...s, results: r } : s)) }).catch(() => {}), 300)
+    return () => { live = false; clearTimeout(t) }
+  }, [search?.q, id]) // eslint-disable-line react-hooks/exhaustive-deps
+  function flashTo(mid) {
+    setTimeout(() => {
+      const el = document.getElementById(`msg-${mid}`)
+      if (!el) return
+      el.scrollIntoView({ block: 'center' })
+      el.classList.remove('flash')
+      void el.offsetWidth
+      el.classList.add('flash')
+    }, 80)
+  }
+  const jumpTo = async (mid) => {
+    setSearch(null)
+    if (msgs?.some((x) => x.id === mid)) return flashTo(mid)
+    try {
+      const l = await api.messages(id, { around: mid })
+      skipScroll.current = true
+      setMsgs(l)
+      setDetached(Boolean(l.hasNewer))
+      flashTo(mid)
+    } catch (e) { toast(e.message, 'error') }
+  }
+  const backToLatest = async () => {
+    setDetached(false)
+    setMsgs(await api.messages(id))
+  }
+  const reloadConv = async () => setConv(await api.conversation(id))
+  const vote = async (m, options) => {
+    const before = votes
+    setVotes((cur) => [...cur.filter((v) => !(v.message_id === m.id && v.user_id === me.id)), ...options.map((o) => ({ message_id: m.id, user_id: me.id, option: o }))])
+    try { await api.voteChatPoll(m.id, options) } catch (e) { setVotes(before); toast(e.message, 'error') }
+  }
 
   useEffect(() => {
     if (!rec) return
@@ -284,6 +388,16 @@ export function ChatRoom({ id }) {
 
   return (
     <div className="chat">
+      {search ? (
+        <header className="topbar lined chat-search-bar">
+          <div className="searchbox grow"><Icon name="search" size={19} />
+            <input className="input" type="search" autoFocus placeholder="ძებნა ამ ჩატში" aria-label="ძებნა ამ ჩატში" value={search.q}
+              onChange={(e) => setSearch({ q: e.target.value, results: e.target.value.trim().length < 2 ? [] : null })}
+              onKeyDown={(e) => { if (e.key === 'Escape') setSearch(null) }} />
+          </div>
+          <button className="btn btn-ghost sm" onClick={() => setSearch(null)}>გაუქმება</button>
+        </header>
+      ) : (
       <header className="topbar lined">
         <button className="icon-btn" onClick={() => back('/inbox')} aria-label="უკან"><Icon name="back" /></button>
         {conv && (isGroup ? (
@@ -309,20 +423,26 @@ export function ChatRoom({ id }) {
             <button className="icon-btn" onClick={() => startCall(conv, other, 'video')} aria-label="ვიდეოზარი"><Icon name="video" /></button>
           </>
         )}
+        {conv && <button className="icon-btn" onClick={() => setPrefs(true)} aria-label="ჩატის პარამეტრები"><Icon name="more" /></button>}
       </header>
+      )}
+      {search && <div className="chat-search-results"><SearchResults results={search.results} q={search.q} onPick={(r) => jumpTo(r.id)} inChat /></div>}
+      {conv?.disappear_hours && !search && (
+        <button className="disappear-pill" onClick={() => setPrefs(true)}><Icon name="timer" size={14} />ქრებადი მესიჯები: {DISAPPEAR_LABEL[conv.disappear_hours]}</button>
+      )}
       <div className="chat-scroll" ref={scroller}>
         {msgs === null && <Loader />}
-        {msgs?.length === 0 && other && (
+        {visible?.length === 0 && other && (
           <div className="empty" style={{ marginTop: 'auto' }}>
             <Avatar user={other} size={72} />
             <h3>{other.full_name || other.username}</h3>
             <p className="small">{conv?.kind === 'dating' ? 'თქვენ ერთმანეთი მოიწონეთ. პირველი ნაბიჯი შენზეა.' : 'დაიწყე საუბარი.'}</p>
           </div>
         )}
-        {msgs?.map((m, i) => {
+        {visible?.map((m, i) => {
           const mine = m.sender_id === me?.id
-          const prev = msgs[i - 1]
-          const nextM = msgs[i + 1]
+          const prev = visible[i - 1]
+          const nextM = visible[i + 1]
           const newDay = !prev || new Date(prev.created_at).toDateString() !== new Date(m.created_at).toDateString()
           const special = (x) => x && (x.meta?.system || x.meta?.call)
           const cont = prev && prev.sender_id === m.sender_id && !newDay && !special(prev)
@@ -349,11 +469,11 @@ export function ChatRoom({ id }) {
           return (
             <Fragment key={m.id}>
               {day}
-              <div className={`msg-row${mine ? ' me' : ''}`}>
+              <div className={`msg-row${mine ? ' me' : ''}`} id={`msg-${m.id}`}>
                 {isGroup && !mine && <span className="av">{lastOfGroup && <Avatar user={people.get(m.sender_id)} size={28} />}</span>}
                 <div className="msg-col">
                   {isGroup && !mine && !cont && <span className="sender-name">{nameOf(m.sender_id)}</span>}
-                  <div className={`bubble ${mine ? 'me' : 'them'}${cont ? ' cont' : ''}${m.deleted_at ? ' deleted' : ''}${m.media_type === 'image' && !m.body && !m.reply ? ' media-only' : ''}`}
+                  <div className={`bubble ${mine ? 'me' : 'them'}${cont ? ' cont' : ''}${m.deleted_at ? ' deleted' : ''}${m.media_type === 'image' && !m.body && !m.reply ? ' media-only' : ''}${m.meta?.poll && !m.deleted_at ? ' poll' : ''}`}
                     onClick={() => tapBubble(m)} {...longPress(m)}>
                     {m.deleted_at ? 'წაშლილი მესიჯი' : (
                       <>
@@ -366,7 +486,7 @@ export function ChatRoom({ id }) {
                         )}
                         {m.media_type === 'image' && <img src={m.media_url} alt="ფოტო" loading="lazy" />}
                         {m.media_type === 'audio' && <audio src={m.media_url} controls preload="metadata" />}
-                        {m.body}
+                        {m.meta?.poll ? <PollBubble m={m} votes={votes} me={me} onVote={vote} /> : m.body}
                       </>
                     )}
                   </div>
@@ -379,12 +499,15 @@ export function ChatRoom({ id }) {
                   )}
                 </div>
               </div>
-              {lastOfGroup && <div className={`bubble-time${mine ? ' me' : ''}`} style={isGroup && !mine ? { marginLeft: 42 } : undefined}>{clock(m.created_at)}</div>}
+              {lastOfGroup && <div className={`bubble-time${mine ? ' me' : ''}`} style={isGroup && !mine ? { marginLeft: 42 } : undefined}>
+                {m.expires_at && <Icon name="timer" size={12} title="ქრებადი მესიჯი" />}{clock(m.created_at)}
+              </div>}
             </Fragment>
           )
         })}
         {typing && <div className="typing" aria-label="წერს"><i /><i /><i /></div>}
       </div>
+      {detached && <button className="to-latest" onClick={backToLatest}><Icon name="arrowUp" size={16} strokeWidth={2.4} className="flip-down" />ბოლო მესიჯები</button>}
       {replyTo && (
         <div className="reply-bar">
           <Icon name="replyArrow" size={18} />
@@ -402,6 +525,7 @@ export function ChatRoom({ id }) {
         ) : (
           <>
             <button className="icon-btn" onClick={() => fileRef.current?.click()} aria-label="ფოტო"><Icon name="image" /></button>
+            {isGroup && !text.trim() && <button className="icon-btn" onClick={() => setPollOpen(true)} aria-label="გამოკითხვა"><Icon name="poll" /></button>}
             <input ref={fileRef} type="file" accept="image/*" hidden onChange={sendPhoto} />
             <textarea ref={inputRef} rows={1} value={text} onChange={onType} placeholder="მესიჯი…" aria-label="მესიჯი"
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) { e.preventDefault(); submit() } }} />
@@ -435,6 +559,14 @@ export function ChatRoom({ id }) {
           </div>
         </Sheet>
       )}
+      {prefs && conv && <ChatPrefsSheet conv={conv} title={convName(conv)} onClose={() => setPrefs(false)} onChanged={reloadConv}
+        onSearch={() => setSearch({ q: '', results: [] })} onInfo={isGroup ? () => setInfo(true) : null} />}
+      {pollOpen && <PollComposer onClose={() => setPollOpen(false)} onSend={async (p) => {
+        try {
+          const m = await api.sendChatPoll(id, p)
+          setMsgs((cur) => (cur.some((x) => x.id === m.id) ? cur : [...cur, { ...m, reactions: m.reactions || [] }]))
+        } catch (e) { toast(e.message, 'error'); throw e }
+      }} />}
       {info && conv && <GroupChatInfo conv={conv} members={members} onClose={() => setInfo(false)}
         onChanged={async () => { setConv(await api.conversation(id)); setMembers(await api.chatMembers(id)) }} />}
     </div>

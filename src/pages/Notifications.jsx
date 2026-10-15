@@ -8,6 +8,7 @@ import { useUnread } from '../components/Shell.jsx'
 import { Swatch } from '../components/games/Swatch.jsx'
 import { priceText } from '../lib/market.js'
 import { badgeOf } from '../lib/rewards.js'
+import { GAMES } from '../games/index.js'
 import { BadgeMedal, CoinIcon } from '../components/Rewards.jsx'
 
 const KIND = {
@@ -29,6 +30,7 @@ const KIND = {
   listing_price: { icon: 'tag', color: '#0f9d8a', text: '' },
   achievement: { icon: 'medal', color: '#8a35e8', text: '' },
   level_up: { icon: 'arrowUp', color: '#df1f52', text: '' },
+  season_end: { icon: 'trophy', color: '#c98a12', text: '' },
 }
 
 function RewardText({ n }) {
@@ -46,6 +48,15 @@ function TournamentText({ n }) {
   return <><b>{title}</b> დასრულდა. შენი ადგილი: მე-{place}{n.data?.players ? ` (${n.data.players}-დან)` : ''}. გაიმარჯვა <b>{n.actor?.full_name || n.actor?.username}</b></>
 }
 
+function SeasonText({ n }) {
+  const d = n.data || {}
+  const game = GAMES[d.type]?.title || d.type
+  const coins = d.coins ? <> <span className="notif-coins">+{d.coins}<CoinIcon size={13} /></span></> : null
+  if (d.place === 1) return <>🏆 სეზონის ჩემპიონი — <b>{game}</b>!{coins}</>
+  return <>სეზონი დასრულდა: <b>{game}</b> — მე-{d.place} ადგილი, {LEAGUE_NAME[d.league] || ''}{coins}</>
+}
+const LEAGUE_NAME = { bronze: 'ბრინჯაოს ლიგა', silver: 'ვერცხლის ლიგა', gold: 'ოქროს ლიგა', platinum: 'პლატინის ლიგა', diamond: 'ალმასის ლიგა' }
+
 function PriceDropText({ n }) {
   const d = n.data || {}
   return <>შენახულ განცხადებას <b>{d.title}</b> ფასი დაუკლეს: <b className="price-new">{priceText(d.price, d.currency)}</b> <s className="faint">{priceText(d.old_price, d.currency)}</s></>
@@ -54,6 +65,7 @@ function PriceDropText({ n }) {
 const linkFor = (n) => {
   if (n.type === 'listing_price' && n.data?.listing_id) return `/market/${n.data.listing_id}`
   if (n.type === 'achievement' || n.type === 'level_up') return '/rewards'
+  if (n.type === 'season_end') return `/games?board=${n.data?.type || ''}`
   if (n.tournament_id) return `/t/${n.tournament_id}`
   if (n.type === 'follow_request') return '/requests'
   if (n.type === 'game_invite' && n.game_id) return `/g/${n.game_id}`
@@ -90,11 +102,11 @@ export default function Notifications() {
               {n.actor ? <Avatar user={n.actor} size={44} />
                 : n.type === 'achievement' ? <BadgeMedal k={n.data?.badge} size={44} />
                   : n.type === 'level_up' ? <span className="notif-level">{n.data?.level}</span>
-                    : <span className="notif-swatch"><Swatch type={n.tournament?.type || n.data?.game || 'nardi'} /></span>}
+                    : <span className="notif-swatch"><Swatch type={n.tournament?.type || n.data?.game || n.data?.type || 'nardi'} /></span>}
               <span className="kind" style={{ background: k.color }}><Icon name={k.icon} size={12} fill={k.icon === 'heart' || k.icon === 'flame'} strokeWidth={2.4} /></span>
             </span>
             <div className="text">
-              {n.type.startsWith('tournament') ? <TournamentText n={n} /> : n.type === 'listing_price' ? <PriceDropText n={n} /> : n.type === 'achievement' || n.type === 'level_up' ? <RewardText n={n} /> : <><b>{n.actor?.full_name || n.actor?.username}</b> {k.text}</>}
+              {n.type.startsWith('tournament') ? <TournamentText n={n} /> : n.type === 'season_end' ? <SeasonText n={n} /> : n.type === 'listing_price' ? <PriceDropText n={n} /> : n.type === 'achievement' || n.type === 'level_up' ? <RewardText n={n} /> : <><b>{n.actor?.full_name || n.actor?.username}</b> {k.text}</>}
               {n.group && <> <b>{n.group.name}</b></>}
               {n.event && <> <b>{n.event.title}</b></>}
               {n.post?.body && n.type !== 'like' && <div className="faint ellipsis">{n.post.body}</div>}

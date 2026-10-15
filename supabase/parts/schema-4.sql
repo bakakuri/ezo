@@ -1,175 +1,5 @@
 -- ეზო — სქემის ნაწილი 4/8. გაუშვი 3-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.leave_chat(p_conv uuid)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if (select kind from conversations where id = p_conv) <> 'group' then raise exception 'პირად ჩატს ვერ დატოვებ'; end if;
-  insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(), 'დატოვა ჩატი', '{"system": true}');
-  delete from conversation_members where conversation_id = p_conv and user_id = auth.uid();
-  -- ადმინი თუ აღარ დარჩა, უძველესი წევრი ხდება ადმინი
-  if not exists (select 1 from conversation_members where conversation_id = p_conv and role = 'admin') then
-    update conversation_members set role = 'admin'
-     where conversation_id = p_conv and user_id = (select user_id from conversation_members where conversation_id = p_conv order by last_read_at limit 1);
-  end if;
-end $$;
-
-create or replace function public.rename_chat(p_conv uuid, p_title text)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if public.chat_role(p_conv) is distinct from 'admin' then raise exception 'მხოლოდ ჩატის ადმინისთვის'; end if;
-  update conversations set title = left(btrim(p_title), 80) where id = p_conv and kind = 'group';
-  insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(), 'შეცვალა სახელი: „' || left(btrim(p_title), 80) || '“', '{"system": true}');
-end $$;
-
-create or replace function public.chat_members(p_conv uuid)
-returns table (id uuid, username text, full_name text, avatar_url text, last_seen timestamptz, role text)
-language sql stable security definer set search_path = public as $$
-  select p.id, p.username, p.full_name, p.avatar_url, p.last_seen, m.role
-  from conversation_members m join profiles p on p.id = m.user_id
-  where m.conversation_id = p_conv and public.is_member(p_conv)
-  order by m.role, p.full_name;
-$$;
-
--- ---------------------------------------------------------------------
--- ზარები (WebRTC). მოწვევა ბაზაშია — აბონენტის ვინაობა ყალბდება ვერ;
--- SDP/ICE იცვლება Realtime არხზე „call:<id>“ (id შემთხვევითი UUID-ია და მხოლოდ ორმა იცის).
--- ---------------------------------------------------------------------
-create table if not exists public.calls (
-  id uuid primary key default gen_random_uuid(),
-  conversation_id uuid not null references public.conversations on delete cascade,
-  caller_id uuid not null references public.profiles on delete cascade,
-  callee_id uuid not null references public.profiles on delete cascade,
-  kind text not null check (kind in ('audio', 'video')),
-  status text not null default 'ringing' check (status in ('ringing', 'accepted', 'declined', 'missed', 'ended', 'busy')),
-  created_at timestamptz not null default now(),
-  answered_at timestamptz,
-  ended_at timestamptz,
-  check (caller_id <> callee_id)
-);
-create index if not exists calls_callee_idx on public.calls (callee_id, created_at desc);
-
-create or replace function public.before_call_insert()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if (select kind from conversations where id = new.conversation_id) not in ('dm', 'dating')
-     or not exists (select 1 from conversation_members where conversation_id = new.conversation_id and user_id = new.callee_id)
-     or not exists (select 1 from conversation_members where conversation_id = new.conversation_id and user_id = new.caller_id)
-     or public.is_blocked(new.caller_id, new.callee_id) then
-    raise exception 'ზარი ამ ჩატში შეუძლებელია';
-  end if;
-  new.status := 'ringing'; new.answered_at := null; new.ended_at := null; new.created_at := now();
-  return new;
-end $$;
-drop trigger if exists calls_before_insert on public.calls;
-create trigger calls_before_insert before insert on public.calls
-  for each row execute function public.before_call_insert();
-
--- დაშვებული გადასვლები: ringing → accepted/declined/busy (პასუხისმგებელი), ringing → missed/ended (დამრეკი),
--- accepted → ended (ორივე). დასრულებული ზარი აღარ იცვლება.
-create or replace function public.before_call_update()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_me uuid := auth.uid();
-begin
-  if old.status in ('declined', 'missed', 'ended', 'busy') then raise exception 'ზარი უკვე დასრულებულია'; end if;
-  new.id := old.id; new.conversation_id := old.conversation_id; new.caller_id := old.caller_id;
-  new.callee_id := old.callee_id; new.kind := old.kind; new.created_at := old.created_at;
-  if old.status = 'ringing' then
-    if new.status in ('accepted', 'declined', 'busy') and v_me is distinct from old.callee_id then raise exception 'not allowed'; end if;
-    if new.status = 'missed' and v_me is distinct from old.caller_id then raise exception 'not allowed'; end if;
-    if new.status = 'ended' and v_me is distinct from old.caller_id then raise exception 'not allowed'; end if;
-  elsif old.status = 'accepted' then
-    if new.status <> 'ended' then raise exception 'not allowed'; end if;
-  end if;
-  if new.status = 'accepted' then new.answered_at := now(); end if;
-  if new.status in ('declined', 'missed', 'ended', 'busy') then
-    new.ended_at := now();
-    if new.status = 'ended' and old.status = 'ringing' then new.status := 'missed'; end if;
-  end if;
-  return new;
-end $$;
-drop trigger if exists calls_before_update on public.calls;
-create trigger calls_before_update before update on public.calls
-  for each row execute function public.before_call_update();
-
-create or replace function public.after_call_change()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_caller text;
-begin
-  if tg_op = 'INSERT' then
-    select coalesce(nullif(full_name, ''), username) into v_caller from profiles where id = new.caller_id;
-    perform public.push_dispatch(new.callee_id, jsonb_build_object(
-      'title', coalesce(v_caller, 'ეზო'),
-      'body', case new.kind when 'video' then '📹 შემომავალი ვიდეოზარი' else '📞 შემომავალი ზარი' end,
-      'url', '/chat/' || new.conversation_id, 'tag', 'call-' || new.id));
-  elsif new.status in ('declined', 'missed', 'ended', 'busy') and old.status not in ('declined', 'missed', 'ended', 'busy') then
-    insert into messages (conversation_id, sender_id, body, meta) values (new.conversation_id, new.caller_id, '',
-      jsonb_build_object('call', jsonb_build_object('id', new.id, 'kind', new.kind, 'status', new.status,
-        'duration', case when new.answered_at is not null then extract(epoch from new.ended_at - new.answered_at)::int else 0 end)));
-  end if;
-  return new;
-end $$;
-drop trigger if exists calls_after_change on public.calls;
-create trigger calls_after_change after insert or update on public.calls
-  for each row execute function public.after_call_change();
-
--- Push: ჯგუფური ჩატის სახელი; ზარის მესიჯს ცალკე push არ სჭირდება
-create or replace function public.on_message_push()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_sender text; v_member uuid; v_kind text; v_title text; v_text text;
-begin
-  if new.meta ? 'call' then return new; end if;
-  select coalesce(nullif(full_name, ''), username) into v_sender from profiles where id = new.sender_id;
-  select kind, title into v_kind, v_title from conversations where id = new.conversation_id;
-  v_text := case new.media_type when 'image' then '📷 ფოტო' when 'audio' then '🎙 ხმოვანი მესიჯი' else left(new.body, 140) end;
-  for v_member in
-    select user_id from conversation_members where conversation_id = new.conversation_id and user_id <> new.sender_id
-  loop
-    perform public.push_dispatch(v_member, jsonb_build_object(
-      'title', case when v_kind = 'group' then coalesce(v_title, 'ჯგუფური ჩატი') else coalesce(v_sender, 'ეზო') end,
-      'body', case when v_kind = 'group' then coalesce(v_sender, '') || ': ' || v_text else v_text end,
-      'url', '/chat/' || new.conversation_id,
-      'tag', 'conv-' || new.conversation_id));
-  end loop;
-  return new;
-end $$;
-
--- ---------------------------------------------------------------------
--- v4 RLS + Realtime
--- ---------------------------------------------------------------------
-alter table public.message_reactions enable row level security;
-alter table public.calls enable row level security;
-
-drop policy if exists "reactions read" on public.message_reactions;
-drop policy if exists "reactions own" on public.message_reactions;
-create policy "reactions read" on public.message_reactions for select to authenticated using (public.is_member(conversation_id));
-create policy "reactions own" on public.message_reactions for all to authenticated
-  using (user_id = auth.uid())
-  with check (user_id = auth.uid() and exists (select 1 from public.messages m where m.id = message_id and public.is_member(m.conversation_id)));
-
-drop policy if exists "calls read" on public.calls;
-drop policy if exists "calls start" on public.calls;
-drop policy if exists "calls update" on public.calls;
-create policy "calls read" on public.calls for select to authenticated using (auth.uid() in (caller_id, callee_id));
-create policy "calls start" on public.calls for insert to authenticated with check (caller_id = auth.uid() and public.can_act());
-create policy "calls update" on public.calls for update to authenticated using (auth.uid() in (caller_id, callee_id));
-
-do $$ begin
-  begin alter publication supabase_realtime add table public.message_reactions; exception when duplicate_object then null; end;
-  begin alter publication supabase_realtime add table public.calls; exception when duplicate_object then null; end;
-end $$;
--- წაშლილი მესიჯის სრული მონაცემი Realtime-ში
-alter table public.messages replica identity full;
-alter table public.message_reactions replica identity full;
-
--- =====================================================================
---  v5: ჯოკერის მაგიდები (4 ადგილი + კომპიუტერი), ბლიცი, ტურნირები (არენა)
--- =====================================================================
-create or replace function public.seat_user(v_g public.games, p_seat text)
-returns uuid language sql immutable as $$
-  select case p_seat when 'a' then v_g.player_a when 'w' then v_g.player_a when 'b' then v_g.player_b
-    when 'c' then v_g.player_c when 'd' then v_g.player_d end;
-$$;
-
 -- მაგიდასთან დაჯდომა (მოწვევით ან ღია მაგიდაზე). სავსე მაგიდა თავისით იწყება.
 create or replace function public.svc_take_seat(p_user uuid, p_id uuid)
 returns text language plpgsql security definer set search_path = public as $$
@@ -497,3 +327,247 @@ end $$;
 drop trigger if exists profiles_privacy on public.profiles;
 create trigger profiles_privacy after update of is_private on public.profiles
   for each row execute function public.on_profile_privacy();
+
+-- ---- გამოკითხვები
+create table if not exists public.polls (
+  post_id uuid primary key references public.posts on delete cascade,
+  options jsonb not null,
+  multi boolean not null default false,
+  closes_at timestamptz not null default now() + interval '1 day',
+  constraint polls_options check (jsonb_typeof(options) = 'array' and jsonb_array_length(options) between 2 and 4),
+  constraint polls_window check (closes_at <= now() + interval '8 days')
+);
+create table if not exists public.poll_votes (
+  post_id uuid references public.polls on delete cascade,
+  user_id uuid references public.profiles on delete cascade,
+  option int not null check (option between 0 and 3),
+  created_at timestamptz not null default now(),
+  primary key (post_id, user_id, option)
+);
+
+create or replace function public.before_poll_insert()
+returns trigger language plpgsql as $$
+declare v text;
+begin
+  for v in select jsonb_array_elements_text(new.options) loop
+    if char_length(btrim(v)) not between 1 and 80 then raise exception 'პასუხი 1–80 სიმბოლო უნდა იყოს'; end if;
+  end loop;
+  return new;
+end $$;
+drop trigger if exists polls_validate on public.polls;
+create trigger polls_validate before insert or update on public.polls
+  for each row execute function public.before_poll_insert();
+
+-- ხმის მიცემა (ძველი ხმა იცვლება). ხმები ანონიმურია: სხვისი ხმები არავის უჩანს.
+create or replace function public.vote_poll(p_post uuid, p_options int[])
+returns void language plpgsql security definer set search_path = public as $$
+declare v_poll polls; v_n int; v_author uuid; v_group uuid;
+begin
+  select * into v_poll from polls where post_id = p_post;
+  if not found then raise exception 'გამოკითხვა ვერ მოიძებნა'; end if;
+  select author_id, group_id into v_author, v_group from posts where id = p_post;
+  if public.is_blocked(auth.uid(), v_author) or not public.can_see_group(v_group)
+     or (v_group is null and not public.can_see_author(v_author)) then raise exception 'გამოკითხვა ვერ მოიძებნა'; end if;
+  if v_poll.closes_at <= now() then raise exception 'გამოკითხვა დასრულებულია'; end if;
+  v_n := jsonb_array_length(v_poll.options);
+  if coalesce(array_length(p_options, 1), 0) = 0 then raise exception 'აირჩიე პასუხი'; end if;
+  if not v_poll.multi and array_length(p_options, 1) > 1 then raise exception 'მხოლოდ ერთი პასუხი'; end if;
+  if exists (select 1 from unnest(p_options) o where o < 0 or o >= v_n) then raise exception 'ასეთი პასუხი არ არის'; end if;
+  delete from poll_votes where post_id = p_post and user_id = auth.uid();
+  insert into poll_votes (post_id, user_id, option) select p_post, auth.uid(), o from (select distinct unnest(p_options) o) x;
+end $$;
+
+create or replace function public.poll_results(p_posts uuid[])
+returns table (post_id uuid, option int, votes bigint, mine boolean)
+language sql stable security definer set search_path = public as $$
+  select v.post_id, v.option, count(*) as votes, bool_or(v.user_id = auth.uid()) as mine
+    from poll_votes v join posts p on p.id = v.post_id
+   where v.post_id = any (p_posts)
+     and not public.is_blocked(auth.uid(), p.author_id) and public.can_see_group(p.group_id)
+     and (p.group_id is not null or public.can_see_author(p.author_id))
+   group by v.post_id, v.option;
+$$;
+
+-- ---- შენახული პოსტები და კოლექციები
+create table if not exists public.collections (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references public.profiles on delete cascade,
+  name text not null check (char_length(btrim(name)) between 1 and 40),
+  created_at timestamptz not null default now()
+);
+create table if not exists public.saves (
+  user_id uuid references public.profiles on delete cascade,
+  post_id uuid references public.posts on delete cascade,
+  collection_id uuid references public.collections on delete set null,
+  created_at timestamptz not null default now(),
+  primary key (user_id, post_id)
+);
+create index if not exists saves_user_idx on public.saves (user_id, created_at desc);
+
+-- ---- სთორის ჰაილაითები (სთორის ასლი, ამიტომ ორიგინალის წაშლა მათ არ შლის)
+create table if not exists public.highlights (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references public.profiles on delete cascade,
+  title text not null check (char_length(btrim(title)) between 1 and 30),
+  cover_url text,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.highlight_items (
+  id uuid primary key default gen_random_uuid(),
+  highlight_id uuid not null references public.highlights on delete cascade,
+  media_url text not null,
+  media_type text not null default 'image' check (media_type in ('image', 'video')),
+  caption text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists highlight_items_idx on public.highlight_items (highlight_id, created_at);
+
+-- ჰაილაითი მხოლოდ საკუთარი სთორიებიდან (ახლო მეგობრების სთორი ჰაილაითში არ გადადის)
+create or replace function public.create_highlight(p_title text, p_stories uuid[])
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid; v_cover text;
+begin
+  if not public.can_act() then raise exception 'ანგარიში დროებით შეზღუდულია'; end if;
+  if coalesce(array_length(p_stories, 1), 0) = 0 then raise exception 'აირჩიე სთორი'; end if;
+  select media_url into v_cover from stories where id = p_stories[1] and author_id = auth.uid();
+  insert into highlights (owner_id, title, cover_url) values (auth.uid(), btrim(p_title), v_cover) returning id into v_id;
+  insert into highlight_items (highlight_id, media_url, media_type, caption, created_at)
+  select v_id, s.media_url, s.media_type, s.caption, s.created_at
+    from stories s where s.id = any (p_stories) and s.author_id = auth.uid() and s.audience = 'all'
+   order by s.created_at;
+  if not exists (select 1 from highlight_items where highlight_id = v_id) then
+    delete from highlights where id = v_id;
+    raise exception 'აირჩიე საჯარო სთორი';
+  end if;
+  return v_id;
+end $$;
+
+-- ---- RLS
+alter table public.follow_requests enable row level security;
+alter table public.polls enable row level security;
+alter table public.poll_votes enable row level security;
+alter table public.collections enable row level security;
+alter table public.saves enable row level security;
+alter table public.highlights enable row level security;
+alter table public.highlight_items enable row level security;
+alter table public.close_friends enable row level security;
+
+drop policy if exists "requests read" on public.follow_requests;
+create policy "requests read" on public.follow_requests for select to authenticated
+  using (requester_id = auth.uid() or target_id = auth.uid());
+drop policy if exists "polls read" on public.polls;
+drop policy if exists "polls create" on public.polls;
+create policy "polls read" on public.polls for select to authenticated
+  using (exists (select 1 from public.posts p where p.id = post_id));
+create policy "polls create" on public.polls for insert to authenticated
+  with check (exists (select 1 from public.posts p where p.id = post_id and p.author_id = auth.uid()));
+drop policy if exists "votes own" on public.poll_votes;
+create policy "votes own" on public.poll_votes for select to authenticated using (user_id = auth.uid());
+drop policy if exists "collections own" on public.collections;
+create policy "collections own" on public.collections for all to authenticated
+  using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+drop policy if exists "saves own" on public.saves;
+create policy "saves own" on public.saves for all to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid() and (collection_id is null
+    or exists (select 1 from public.collections c where c.id = collection_id and c.owner_id = auth.uid())));
+drop policy if exists "highlights read" on public.highlights;
+drop policy if exists "highlights own" on public.highlights;
+drop policy if exists "highlights delete" on public.highlights;
+create policy "highlights read" on public.highlights for select to authenticated
+  using (not public.is_blocked(auth.uid(), owner_id) and public.can_see_author(owner_id));
+create policy "highlights own" on public.highlights for update to authenticated using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+create policy "highlights delete" on public.highlights for delete to authenticated using (owner_id = auth.uid());
+drop policy if exists "highlight items read" on public.highlight_items;
+drop policy if exists "highlight items delete" on public.highlight_items;
+create policy "highlight items read" on public.highlight_items for select to authenticated
+  using (exists (select 1 from public.highlights h where h.id = highlight_id));
+create policy "highlight items delete" on public.highlight_items for delete to authenticated
+  using (exists (select 1 from public.highlights h where h.id = highlight_id and h.owner_id = auth.uid()));
+drop policy if exists "close friends own" on public.close_friends;
+create policy "close friends own" on public.close_friends for all to authenticated
+  using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
+revoke execute on function public.on_profile_privacy() from public, anon, authenticated;
+
+-- =====================================================================
+--  v7: ბაზარი — განცხადებები, შენახვა, ნახვები, აწევა, ფასის კლების შეტყობინება
+-- =====================================================================
+create table if not exists public.listings (
+  id uuid primary key default gen_random_uuid(),
+  seller_id uuid not null references public.profiles on delete cascade,
+  title text not null check (char_length(title) between 3 and 80),
+  description text not null default '' check (char_length(description) <= 3000),
+  price numeric(12, 2) check (price is null or (price >= 0 and price <= 99999999)), -- null = შეთანხმებით, 0 = უფასოდ
+  currency text not null default 'GEL' check (currency in ('GEL', 'USD')),
+  category text not null check (category in ('electronics', 'vehicles', 'realty', 'home', 'fashion', 'kids', 'hobby', 'animals', 'services', 'other')),
+  condition text check (condition in ('new', 'used')),
+  city text not null default '' check (char_length(city) <= 40),
+  photos jsonb not null default '[]'::jsonb check (jsonb_typeof(photos) = 'array' and jsonb_array_length(photos) <= 8),
+  status text not null default 'active' check (status in ('active', 'reserved', 'sold')),
+  hidden boolean not null default false,
+  views_count int not null default 0,
+  saves_count int not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  bumped_at timestamptz not null default now()
+);
+create index if not exists listings_feed_idx on public.listings (status, bumped_at desc);
+create index if not exists listings_cat_idx on public.listings (category, status, bumped_at desc);
+create index if not exists listings_seller_idx on public.listings (seller_id, created_at desc);
+
+create table if not exists public.listing_saves (
+  user_id uuid references public.profiles on delete cascade,
+  listing_id uuid references public.listings on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (user_id, listing_id)
+);
+create index if not exists listing_saves_listing_idx on public.listing_saves (listing_id);
+
+create table if not exists public.listing_views (
+  listing_id uuid references public.listings on delete cascade,
+  viewer_id uuid references public.profiles on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (listing_id, viewer_id)
+);
+
+create or replace function public.price_text(p_price numeric, p_currency text)
+returns text language sql immutable as $$
+  select case when p_price is null then 'ფასი შეთანხმებით'
+              when p_price = 0 then 'უფასოდ'
+              else (case when p_currency = 'USD' then '$' else '' end)
+                || replace(to_char(p_price, case when p_price = trunc(p_price) then 'FM999,999,999' else 'FM999,999,990.00' end), ',', ' ')
+                || (case when p_currency = 'USD' then '' else ' ₾' end) end;
+$$;
+
+-- მომხმარებელი ვერ შეცვლის მთვლელებს, თარიღებს და დამალვას; ლიმიტები სპამის წინააღმდეგ
+create or replace function public.listings_guard()
+returns trigger language plpgsql security invoker set search_path = public as $$
+begin
+  if current_user in ('authenticated', 'anon') then
+    if tg_op = 'INSERT' then
+      new.views_count := 0; new.saves_count := 0; new.hidden := false; new.status := 'active';
+      new.created_at := now(); new.bumped_at := now();
+      if (select count(*) from listings where seller_id = new.seller_id and created_at > now() - interval '1 day') >= 10 then
+        raise exception 'დღეში მაქსიმუმ 10 განცხადების დამატება შეიძლება';
+      end if;
+      if (select count(*) from listings where seller_id = new.seller_id and status <> 'sold') >= 60 then
+        raise exception 'აქტიური განცხადებების ლიმიტი ამოიწურა — ძველები გაყიდულად მონიშნე ან წაშალე';
+      end if;
+    else
+      new.seller_id := old.seller_id; new.views_count := old.views_count; new.saves_count := old.saves_count;
+      new.hidden := old.hidden; new.created_at := old.created_at; new.bumped_at := old.bumped_at;
+    end if;
+  end if;
+  new.title := btrim(regexp_replace(new.title, '\s+', ' ', 'g'));
+  new.city := btrim(new.city);
+  if exists (select 1 from jsonb_array_elements(new.photos) e
+              where jsonb_typeof(e) <> 'string' or char_length(e #>> '{}') > 600 or (e #>> '{}') !~ '^https?://') then
+    raise exception 'ფოტოს ბმული არასწორია';
+  end if;
+  if tg_op = 'INSERT' or new is distinct from old then new.updated_at := now(); end if;
+  return new;
+end $$;
+drop trigger if exists listings_guard on public.listings;
+create trigger listings_guard before insert or update on public.listings
+  for each row execute function public.listings_guard();

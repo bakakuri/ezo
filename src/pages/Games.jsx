@@ -8,7 +8,8 @@ import { GAME_LIST, GAMES, seatsOf } from '../games/index.js'
 import { TournamentCard, CreateTournament, phaseOf } from './Tournament.jsx'
 import { api } from '../lib/api.js'
 import { useAuth } from '../lib/auth.jsx'
-import { Link, navigate } from '../lib/router.jsx'
+import { Link, navigate, useLocation } from '../lib/router.jsx'
+import { RatingBoard } from '../components/Seasons.jsx'
 import { timeAgo } from '../lib/format.js'
 import { useToast } from '../components/Toast.jsx'
 
@@ -19,8 +20,6 @@ export default function Games() {
   const [mine, setMine] = useState(null)
   const [stats, setStats] = useState({})
   const [pick, setPick] = useState(null)
-  const [board, setBoard] = useState('nardi')
-  const [leaders, setLeaders] = useState(null)
   const [tours, setTours] = useState(null)
   const [newTour, setNewTour] = useState(false)
   const [puzzle, setPuzzle] = useState(null)
@@ -34,7 +33,14 @@ export default function Games() {
     api.dailyPuzzle().then(setPuzzle).catch(() => {})
     api.liveGames().then(setLive).catch(() => {})
   }, [me.id])
-  useEffect(() => { setLeaders(null); api.leaderboard(board).then(setLeaders).catch(() => setLeaders([])) }, [board])
+  // შეტყობინებიდან (?board=nardi) — პირდაპირ რეიტინგზე
+  const { query } = useLocation()
+  const boardType = query.get('board')
+  useEffect(() => {
+    if (!boardType) return
+    const t = setTimeout(() => document.getElementById('board')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 350)
+    return () => clearTimeout(t)
+  }, [boardType])
 
   return (
     <>
@@ -128,22 +134,7 @@ export default function Games() {
       {tours && [...tours].sort((x, y) => ({ live: 0, soon: 1, done: 2 }[phaseOf(x)] - { live: 0, soon: 1, done: 2 }[phaseOf(y)])).slice(0, 5)
         .map((t) => <TournamentCard key={t.id} t={t} />)}
 
-      <div className="section-title"><h2>საუკეთესოები</h2></div>
-      <div className="chips">
-        {GAME_LIST.map((g) => <button key={g.type} className={`chip${board === g.type ? ' on' : ''}`} onClick={() => setBoard(g.type)}>{g.title}</button>)}
-      </div>
-      <div style={{ padding: '8px 0 20px' }}>
-        {leaders === null && <Loader />}
-        {leaders?.length === 0 && <p className="pad small faint">ჯერ არავის უთამაშია. იყავი პირველი.</p>}
-        {leaders?.map((l, i) => (
-          <Link key={l.user_id} to={`/u/${l.p?.username}`} className={`leader${l.user_id === me.id ? ' me' : ''}`}>
-            <span className={`pos${i < 3 ? ' top' : ''}`}>{i + 1}</span>
-            <Avatar user={l.p} size={38} />
-            <div style={{ minWidth: 0 }}><b className="ellipsis" style={{ display: 'block' }}>{l.p?.full_name || l.p?.username}</b><span className="xs faint">{l.wins} მოგება, {l.losses} წაგება</span></div>
-            <span className="rt">{l.rating}</span>
-          </Link>
-        ))}
-      </div>
+      <RatingBoard me={me} initialType={boardType} />
 
       {pick && <ModeSheet type={pick} onClose={() => setPick(null)} />}
       {newTour && <CreateTournament onClose={() => setNewTour(false)} />}

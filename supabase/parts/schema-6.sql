@@ -1,298 +1,5 @@
 -- ეზო — სქემის ნაწილი 6/8. გაუშვი 5-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.my_progress()
-returns jsonb language plpgsql stable security definer set search_path = public as $$
-declare v progress;
-begin
-  select * into v from progress where user_id = auth.uid();
-  return jsonb_build_object('xp', coalesce(v.xp, 0), 'coins', coalesce(v.coins, 0), 'streak',
-      case when v.last_day >= public.tbilisi_today() - 1 then v.streak else 0 end,
-    'best_streak', coalesce(v.best_streak, 0), 'last_day', v.last_day, 'level', public.level_of(coalesce(v.xp, 0)),
-    'claimed_today', coalesce(v.last_day = public.tbilisi_today(), false), 'metrics', public.badge_metrics(auth.uid()));
-end $$;
-
--- სხვისი პროფილისთვის: დონე, სერია, ბეჯები (ბროწეულის ბალანსი პირადია)
-create or replace function public.profile_progress(p_user uuid)
-returns jsonb language sql stable security definer set search_path = public as $$
-  select jsonb_build_object(
-    'level', public.level_of(coalesce((select xp from progress where user_id = p_user), 0)),
-    'xp', coalesce((select xp from progress where user_id = p_user), 0),
-    'streak', coalesce((select streak from progress where user_id = p_user and last_day >= public.tbilisi_today() - 1), 0),
-    'badges', coalesce((select jsonb_agg(badge order by earned_at) from user_badges where user_id = p_user), '[]'::jsonb))
-  where not public.is_blocked(auth.uid(), p_user);
-$$;
-
--- კვირის ლიდერები: 'friends' — ვისაც გამოვიწერ + მე; 'all' — ყველა
-create or replace function public.xp_leaderboard(p_scope text default 'friends')
-returns table (user_id uuid, username text, full_name text, avatar_url text, week_xp bigint, level int)
-language sql stable security definer set search_path = public as $$
-  select p.id, p.username, p.full_name, p.avatar_url, sum(e.xp)::bigint, public.level_of(coalesce(pr.xp, 0))
-    from progress_events e
-    join profiles p on p.id = e.user_id
-    left join progress pr on pr.user_id = p.id
-   where e.xp > 0
-     and e.created_at >= (date_trunc('week', now() at time zone 'Asia/Tbilisi') at time zone 'Asia/Tbilisi')
-     and (p.banned_until is null or p.banned_until < now())
-     and not public.is_blocked(auth.uid(), p.id)
-     and (p_scope = 'all' or p.id = auth.uid() or exists (select 1 from follows f where f.follower_id = auth.uid() and f.following_id = p.id))
-   group by p.id, pr.xp
-   order by 5 desc, p.username
-   limit 50;
-$$;
-
--- ---- ქულები მოქმედებებზე
-create or replace function public.progress_on_post()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if new.parent_id is null then
-    perform public.award(new.author_id, 'post', 5, 0, null, 10);
-    perform public.check_badges(new.author_id, 'posts');
-  else
-    perform public.award(new.author_id, 'reply', 2, 0, null, 20);
-  end if;
-  return null;
-end $$;
-drop trigger if exists zz_progress_posts on public.posts;
-create trigger zz_progress_posts after insert on public.posts for each row execute function public.progress_on_post();
-
-create or replace function public.progress_on_like()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_author uuid;
-begin
-  select author_id into v_author from posts where id = new.post_id;
-  if v_author is not null and v_author <> new.user_id then
-    perform public.award(v_author, 'like', 1, 0, null, 50);
-    perform public.check_badges(v_author, 'likes');
-  end if;
-  return null;
-end $$;
-drop trigger if exists zz_progress_likes on public.likes;
-create trigger zz_progress_likes after insert on public.likes for each row execute function public.progress_on_like();
-
-create or replace function public.progress_on_follow()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  perform public.award(new.following_id, 'follower', 3, 0, new.follower_id::text, 20);
-  perform public.check_badges(new.following_id, 'followers');
-  return null;
-end $$;
-drop trigger if exists zz_progress_follows on public.follows;
-create trigger zz_progress_follows after insert on public.follows for each row execute function public.progress_on_follow();
-
--- თამაში: მონაწილეობა +5 XP, მოგება +10 XP და 3 ბროწეული (მინიმუმ 4 სვლა, დღიური ლიმიტით)
-create or replace function public.progress_on_game()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare u uuid; s text;
-begin
-  if new.status = 'finished' and old.status = 'active' and new.move_no >= 4 then
-    foreach s in array array['a', 'b', 'c', 'd'] loop
-      u := case s when 'a' then new.player_a when 'b' then new.player_b when 'c' then new.player_c else new.player_d end;
-      continue when u is null or s = any (new.bots);
-      perform public.award(u, 'game', 5, 0, new.id::text, 30);
-      if new.winner = u then perform public.award(u, 'win', 10, 3, new.id::text, 10); end if;
-    end loop;
-  end if;
-  return null;
-end $$;
-drop trigger if exists zz_progress_games on public.games;
-create trigger zz_progress_games after update of status on public.games for each row execute function public.progress_on_game();
--- ბეჯები სტატისტიკის განახლების შემდეგ (რეიტინგი თამაშის დასრულების შემდეგ ითვლება)
-create or replace function public.progress_on_stats()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  perform public.check_badges(new.user_id, 'games');
-  perform public.check_badges(new.user_id, 'wins');
-  return null;
-end $$;
-drop trigger if exists zz_progress_stats on public.game_stats;
-create trigger zz_progress_stats after update on public.game_stats for each row execute function public.progress_on_stats();
-
--- ტურნირის პრიზები: 50 / 30 / 20 ბროწეული
-create or replace function public.progress_on_place()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if new.place between 1 and 3 and old.place is distinct from new.place and new.games > 0 then
-    perform public.award(new.user_id, 'tournament', (4 - new.place) * 15, case new.place when 1 then 50 when 2 then 30 else 20 end, new.tournament_id::text);
-    if new.place = 1 then perform public.check_badges(new.user_id, 'tourney'); end if;
-  end if;
-  return null;
-end $$;
-drop trigger if exists zz_progress_places on public.tournament_players;
-create trigger zz_progress_places after update of place on public.tournament_players for each row execute function public.progress_on_place();
-
-create or replace function public.progress_on_sale()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if new.status = 'sold' and old.status <> 'sold' then
-    perform public.award(new.seller_id, 'sale', 10, 5, new.id::text);
-    perform public.check_badges(new.seller_id, 'sales');
-  end if;
-  return null;
-end $$;
-drop trigger if exists zz_progress_sales on public.listings;
-create trigger zz_progress_sales after update of status on public.listings for each row execute function public.progress_on_sale();
-
--- საჩუქრები: ბროწეული და გული უფასოა (დღეში 5), დანარჩენი ბროწეულით
-alter table public.gifts drop constraint if exists gifts_kind_check;
-alter table public.gifts add constraint gifts_kind_check check (kind in ('pomegranate', 'churchkhela', 'khachapuri', 'wine', 'rose', 'heart', 'star', 'dice', 'qvevri', 'crown'));
-create or replace function public.gift_price(p_kind text)
-returns int language sql immutable as $$
-  select case p_kind when 'churchkhela' then 10 when 'khachapuri' then 15 when 'rose' then 20 when 'wine' then 25
-                     when 'dice' then 30 when 'star' then 40 when 'qvevri' then 60 when 'crown' then 100 else 0 end;
-$$;
-create or replace function public.before_gift()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_price int := public.gift_price(new.kind);
-begin
-  if v_price = 0 then
-    if (select count(*) from gifts where from_id = new.from_id and created_at > now() - interval '1 day' and public.gift_price(kind) = 0) >= 5 then
-      raise exception 'უფასო საჩუქარი დღეში 5-ჯერ შეიძლება — სხვები ბროწეულით იგზავნება';
-    end if;
-  else
-    perform public.spend_coins(new.from_id, v_price, 'gift', new.kind);
-  end if;
-  return new;
-end $$;
-drop trigger if exists gifts_before_insert on public.gifts;
-create trigger gifts_before_insert before insert on public.gifts for each row execute function public.before_gift();
-create or replace function public.progress_on_gift()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  perform public.award(new.to_id, 'gift_received', 5, 0, null, 10);
-  perform public.check_badges(new.from_id, 'gifts');
-  return null;
-end $$;
-drop trigger if exists zz_progress_gifts on public.gifts;
-create trigger zz_progress_gifts after insert on public.gifts for each row execute function public.progress_on_gift();
-
--- ---- RLS: ბალანსი და ისტორია მხოლოდ საკუთარი; ცვლილება მხოლოდ ფუნქციებით
-alter table public.progress enable row level security;
-alter table public.progress_events enable row level security;
-alter table public.badges enable row level security;
-alter table public.user_badges enable row level security;
-drop policy if exists "progress own" on public.progress;
-create policy "progress own" on public.progress for select to authenticated using (user_id = auth.uid());
-drop policy if exists "progress events own" on public.progress_events;
-create policy "progress events own" on public.progress_events for select to authenticated using (user_id = auth.uid());
-drop policy if exists "badges read" on public.badges;
-create policy "badges read" on public.badges for select to authenticated using (true);
-drop policy if exists "user badges read" on public.user_badges;
-create policy "user badges read" on public.user_badges for select to authenticated using (not public.is_blocked(auth.uid(), user_id));
-
-revoke execute on function public.award(uuid, text, int, int, text, int) from public, anon, authenticated;
-revoke execute on function public.spend_coins(uuid, int, text, text) from public, anon, authenticated;
-revoke execute on function public.check_badges(uuid, text) from public, anon, authenticated;
-revoke execute on function public.badge_metrics(uuid, text) from public, anon, authenticated;
-revoke execute on function public.progress_on_post() from public, anon, authenticated;
-revoke execute on function public.progress_on_like() from public, anon, authenticated;
-revoke execute on function public.progress_on_follow() from public, anon, authenticated;
-revoke execute on function public.progress_on_game() from public, anon, authenticated;
-revoke execute on function public.progress_on_place() from public, anon, authenticated;
-revoke execute on function public.progress_on_stats() from public, anon, authenticated;
-revoke execute on function public.progress_on_sale() from public, anon, authenticated;
-revoke execute on function public.progress_on_gift() from public, anon, authenticated;
-revoke execute on function public.before_gift() from public, anon, authenticated;
-
--- =====================================================================
---  v9: თამაშები 2.0 — ბურა, ლოტო, დღის ამოცანა, ყურება, რეაქციები და ჩატი თამაშისას
--- =====================================================================
--- ბურა ტურნირებშიც (ლოტო — მხოლოდ მაგიდა)
-alter table public.tournaments drop constraint if exists tournaments_type_check;
-alter table public.tournaments add constraint tournaments_type_check
-  check (type in ('nardi', 'longnardi', 'chess', 'checkers', 'domino', 'durak', 'bura'));
-create index if not exists games_live_idx on public.games (updated_at desc) where status = 'active' and is_public;
-
--- ---- დღის ჭადრაკის ამოცანა (ამონახსნი კლიენტს არ ეგზავნება — სვლებს სერვერი ამოწმებს)
-create table if not exists public.chess_puzzles (
-  id int primary key,
-  title text not null,
-  fen text not null,
-  solution text[] not null
-);
-insert into public.chess_puzzles (id, title, fen, solution) values
-  (1, 'უკანა რიგი', '6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1', array['d1d8']),
-  (2, 'სკოლის მატი', 'r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1', array['f3f7']),
-  (3, 'ფილიდორის მემკვიდრეობა', 'r6k/6pp/7N/8/8/1Q6/6PP/6K1 w - - 0 1', array['b3g8', 'a8g8', 'h6f7']),
-  (4, 'უსწრაფესი მატი', 'rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2', array['d8h4']),
-  (5, 'არაბული მატი', '7k/R7/5N2/8/8/8/8/6K1 w - - 0 1', array['a7h7']),
-  (6, 'ჩახრჩობილი მეფე', '6rk/6pp/8/6N1/8/8/8/6K1 w - - 0 1', array['g5f7']),
-  (7, 'შავების ჯერია: უკანა რიგი', '3r2k1/8/8/8/8/8/5PPP/6K1 b - - 0 1', array['d8d1']),
-  (8, 'ეპოლეტები', '3rkr2/8/8/8/2Q5/8/8/4K3 w - - 0 1', array['c4e6']),
-  (9, 'დერეფანი', '6k1/5ppp/8/8/8/8/8/K3Q3 w - - 0 1', array['e1e8']),
-  (10, 'ფილიდორი შავებით', '6k1/6pp/1q6/8/8/7n/6PP/R6K b - - 0 1', array['b6g1', 'a1g1', 'h3f2']),
-  (11, 'მეფე და ეტლი', 'k7/8/1K6/8/8/8/8/7R w - - 0 1', array['h1h8']),
-  (12, 'ცხენის ხაფანგი', '6k1/8/8/8/8/3n4/6PP/6RK b - - 0 1', array['d3f2']),
-  (13, 'ოპოზიცია', '4k3/8/4K3/8/8/8/8/R7 w - - 0 1', array['a1a8']),
-  (14, 'სკოლის მატი, მეორე ვარიანტი', 'r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1', array['f3f7'])
-on conflict (id) do update set title = excluded.title, fen = excluded.fen, solution = excluded.solution;
-
-create table if not exists public.puzzle_solves (
-  user_id uuid references public.profiles on delete cascade,
-  day date not null,
-  puzzle_id int not null references public.chess_puzzles,
-  solved boolean not null default false,
-  attempts int not null default 0,
-  solved_at timestamptz,
-  primary key (user_id, day)
-);
-
-create or replace function public.puzzle_of_day(p_day date)
-returns public.chess_puzzles language sql stable security definer set search_path = public as $$
-  select * from public.chess_puzzles
-   where id = (((p_day - date '2026-01-01') % (select count(*) from public.chess_puzzles)::int
-               + (select count(*) from public.chess_puzzles)::int) % (select count(*) from public.chess_puzzles)::int) + 1;
-$$;
-
-create or replace function public.daily_puzzle()
-returns jsonb language plpgsql stable security definer set search_path = public as $$
-declare v_day date := public.tbilisi_today(); p chess_puzzles; r puzzle_solves;
-begin
-  p := public.puzzle_of_day(v_day);
-  select * into r from puzzle_solves where user_id = auth.uid() and day = v_day;
-  return jsonb_build_object('day', v_day, 'id', p.id, 'title', p.title, 'fen', p.fen,
-    'moves', ceil(array_length(p.solution, 1) / 2.0)::int,
-    'solved', coalesce(r.solved, false), 'attempts', coalesce(r.attempts, 0),
-    'solution', case when r.solved then to_jsonb(p.solution) end,
-    'solvers', (select count(*) from puzzle_solves where day = v_day and solved));
-end $$;
-
--- p_moves: მთელი თანმიმდევრობა ამ მომენტამდე (ჩემი სვლები და პასუხები), ბოლო — ჩემი ახალი სვლა
-create or replace function public.puzzle_move(p_moves text[])
-returns jsonb language plpgsql security definer set search_path = public as $$
-declare v_day date := public.tbilisi_today(); p chess_puzzles; n int := coalesce(array_length(p_moves, 1), 0); v_len int; v_ok boolean;
-begin
-  if auth.uid() is null then raise exception 'not signed in'; end if;
-  p := public.puzzle_of_day(v_day);
-  v_len := array_length(p.solution, 1);
-  if n = 0 or n % 2 = 0 or n > v_len then raise exception 'არასწორი სვლა'; end if;
-  v_ok := p_moves = p.solution[1:n];
-  insert into puzzle_solves (user_id, day, puzzle_id) values (auth.uid(), v_day, p.id) on conflict do nothing;
-  if not v_ok then
-    update puzzle_solves set attempts = attempts + 1 where user_id = auth.uid() and day = v_day and not solved;
-    return jsonb_build_object('correct', false);
-  end if;
-  if n = v_len then
-    update puzzle_solves set solved = true, solved_at = now(), attempts = attempts + 1
-     where user_id = auth.uid() and day = v_day and not solved;
-    if found then perform public.award(auth.uid(), 'puzzle', 15, 5, v_day::text); end if;
-    return jsonb_build_object('correct', true, 'solved', true,
-      'attempts', (select attempts from puzzle_solves where user_id = auth.uid() and day = v_day),
-      'solvers', (select count(*) from puzzle_solves where day = v_day and solved));
-  end if;
-  return jsonb_build_object('correct', true, 'solved', false, 'reply', p.solution[n + 1]);
-end $$;
-
--- ---- რეაქციები და ჩატი თამაშისას
-create table if not exists public.game_messages (
-  id bigint generated always as identity primary key,
-  game_id uuid not null references public.games on delete cascade,
-  user_id uuid not null references public.profiles on delete cascade,
-  kind text not null check (kind in ('emoji', 'text')),
-  body text not null check (char_length(body) between 1 and 200),
-  created_at timestamptz not null default now()
-);
-create index if not exists game_messages_game_idx on public.game_messages (game_id, created_at desc);
-
 create or replace function public.is_game_player(p_game uuid)
 returns boolean language sql stable security definer set search_path = public as $$
   select exists (select 1 from games g where g.id = p_game
@@ -452,3 +159,356 @@ drop trigger if exists rate_guard on public.reports;
 create trigger rate_guard before insert on public.reports for each row execute function public.rate_guard();
 drop trigger if exists rate_guard on public.stories;
 create trigger rate_guard before insert on public.stories for each row execute function public.rate_guard();
+
+-- ---- აკრძალული სიტყვები (მოდერატორი მართავს)
+create table if not exists public.banned_words (
+  word text primary key check (char_length(word) between 2 and 60 and word = lower(word)),
+  created_at timestamptz not null default now()
+);
+create or replace function public.has_banned(p_text text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from banned_words w where position(w.word in lower(coalesce(p_text, ''))) > 0);
+$$;
+create or replace function public.words_guard()
+returns trigger language plpgsql security invoker set search_path = public as $$
+declare v_text text;
+begin
+  if current_user not in ('authenticated', 'anon') then return new; end if;
+  case tg_table_name
+    when 'posts' then v_text := new.body;
+    when 'messages' then v_text := new.body;
+    when 'game_messages' then v_text := new.body;
+    when 'listings' then v_text := new.title || ' ' || new.description;
+    when 'profiles' then v_text := new.username || ' ' || new.full_name || ' ' || new.bio;
+    else return new;
+  end case;
+  if public.has_banned(v_text) then raise exception 'ტექსტი შეიცავს აკრძალულ სიტყვას'; end if;
+  return new;
+end $$;
+drop trigger if exists words_guard on public.posts;
+create trigger words_guard before insert or update of body on public.posts for each row execute function public.words_guard();
+drop trigger if exists words_guard on public.messages;
+create trigger words_guard before insert on public.messages for each row execute function public.words_guard();
+drop trigger if exists words_guard on public.game_messages;
+create trigger words_guard before insert on public.game_messages for each row execute function public.words_guard();
+drop trigger if exists words_guard on public.listings;
+create trigger words_guard before insert or update of title, description on public.listings for each row execute function public.words_guard();
+drop trigger if exists words_guard on public.profiles;
+create trigger words_guard before update of username, full_name, bio on public.profiles for each row execute function public.words_guard();
+
+-- ---- ჩემი მონაცემები: ჩამოტვირთვა და ანგარიშის წაშლა
+create or replace function public.export_my_data()
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare u uuid := auth.uid();
+begin
+  if u is null then raise exception 'not signed in'; end if;
+  if not public.mfa_ok() then raise exception 'საჭიროა ორფაქტორიანი შესვლა'; end if;
+  return jsonb_build_object(
+    'exported_at', now(),
+    'profile', (select to_jsonb(p) - 'role' from profiles p where id = u),
+    'posts', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'body', body, 'media', media, 'kind', kind, 'parent_id', parent_id, 'created_at', created_at) order by created_at) from posts where author_id = u), '[]'),
+    'likes', coalesce((select jsonb_agg(jsonb_build_object('post_id', post_id, 'created_at', created_at)) from likes where user_id = u), '[]'),
+    'following', coalesce((select jsonb_agg(p.username) from follows f join profiles p on p.id = f.following_id where f.follower_id = u), '[]'),
+    'followers', coalesce((select jsonb_agg(p.username) from follows f join profiles p on p.id = f.follower_id where f.following_id = u), '[]'),
+    'messages_sent', coalesce((select jsonb_agg(jsonb_build_object('conversation_id', conversation_id, 'body', body, 'media_url', media_url, 'created_at', created_at) order by created_at)
+                               from messages where sender_id = u and deleted_at is null), '[]'),
+    'stories', coalesce((select jsonb_agg(jsonb_build_object('media_url', media_url, 'caption', caption, 'created_at', created_at)) from stories where author_id = u), '[]'),
+    'listings', coalesce((select jsonb_agg(to_jsonb(l) - 'hidden') from listings l where seller_id = u), '[]'),
+    'gifts_sent', coalesce((select jsonb_agg(jsonb_build_object('to', to_id, 'kind', kind, 'note', note, 'created_at', created_at)) from gifts where from_id = u), '[]'),
+    'gifts_received', coalesce((select jsonb_agg(jsonb_build_object('from', from_id, 'kind', kind, 'note', note, 'created_at', created_at)) from gifts where to_id = u), '[]'),
+    'game_stats', coalesce((select jsonb_agg(to_jsonb(g) - 'user_id') from game_stats g where user_id = u), '[]'),
+    'progress', (select to_jsonb(x) - 'user_id' from progress x where user_id = u),
+    'badges', coalesce((select jsonb_agg(badge) from user_badges where user_id = u), '[]'),
+    'dating_profile', (select to_jsonb(d) - 'user_id' from dating_profiles d where user_id = u));
+end $$;
+
+create or replace function public.delete_my_account()
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'not signed in'; end if;
+  if not public.mfa_ok() then raise exception 'საჭიროა ორფაქტორიანი შესვლა'; end if;
+  delete from auth.users where id = auth.uid();
+end $$;
+
+alter table public.banned_words enable row level security;
+drop policy if exists "banned words staff" on public.banned_words;
+create policy "banned words staff" on public.banned_words for all to authenticated using (public.is_staff()) with check (public.is_staff());
+
+-- ---- 2FA: aal1 სესიით (მხოლოდ პაროლი) მგრძნობიარე ცხრილები არ იხსნება
+do $$
+declare t text;
+begin
+  foreach t in array array['messages', 'notifications', 'dating_profiles', 'swipes', 'push_subscriptions', 'follow_requests',
+                           'close_friends', 'collections', 'saves', 'listing_saves', 'game_messages'] loop
+    execute format('drop policy if exists "mfa guard" on public.%I', t);
+    execute format('create policy "mfa guard" on public.%I as restrictive for all to authenticated using (public.mfa_ok()) with check (public.mfa_ok())', t);
+  end loop;
+  foreach t in array array['posts', 'listings', 'stories', 'follows', 'likes', 'gifts', 'profiles'] loop
+    execute format('drop policy if exists "mfa write ins" on public.%I', t);
+    execute format('drop policy if exists "mfa write upd" on public.%I', t);
+    execute format('drop policy if exists "mfa write del" on public.%I', t);
+    execute format('create policy "mfa write ins" on public.%I as restrictive for insert to authenticated with check (public.mfa_ok())', t);
+    execute format('create policy "mfa write upd" on public.%I as restrictive for update to authenticated using (public.mfa_ok())', t);
+    execute format('create policy "mfa write del" on public.%I as restrictive for delete to authenticated using (public.mfa_ok())', t);
+  end loop;
+end $$;
+
+revoke execute on function public.rate_count(text, timestamptz) from public, anon;
+revoke execute on function public.has_banned(text) from public, anon;
+
+-- ---------------------------------------------------------------------
+-- შეცდომების ჟურნალი: აპის შეცდომები ბრაუზერიდან (ადმინ პანელი → „შეცდომები“). 30 დღეზე ძველი თავისით იშლება.
+-- ---------------------------------------------------------------------
+create table if not exists public.client_errors (
+  id bigint generated always as identity primary key,
+  user_id uuid references auth.users on delete set null,
+  message text not null,
+  stack text,
+  path text,
+  source text not null default 'window',
+  release text,
+  user_agent text,
+  created_at timestamptz not null default now()
+);
+create index if not exists client_errors_time_idx on public.client_errors (created_at desc);
+create index if not exists client_errors_user_idx on public.client_errors (user_id, created_at desc);
+create index if not exists client_errors_msg_idx on public.client_errors (message, created_at desc);
+-- ცხრილზე პირდაპირი წვდომა არავის აქვს: ჩაწერა log_client_error-ით, წაკითხვა admin_errors-ით
+alter table public.client_errors enable row level security;
+revoke all on public.client_errors from anon, authenticated;
+
+-- p_source: 'boundary' (ეკრანი ჩავარდა) | 'window' | 'promise' | 'api' (სქემის/API-ს შეუსაბამობა) | 'chunk' (ძველი ვერსიის ფაილები)
+create or replace function public.log_client_error(p_message text, p_stack text default null, p_path text default null,
+  p_source text default 'window', p_release text default null, p_agent text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare u uuid := auth.uid(); v_msg text;
+begin
+  v_msg := left(btrim(regexp_replace(coalesce(p_message, ''), '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<id>', 'gi')), 500);
+  if v_msg = '' then return; end if;
+  -- ზღვარი: ერთ ადამიანზე 30 ჩანაწერი საათში, შეუსვლელებზე ჯამში 300
+  if u is not null then
+    if (select count(*) from client_errors where user_id = u and created_at > now() - interval '1 hour') >= 30 then return; end if;
+  elsif (select count(*) from client_errors where user_id is null and created_at > now() - interval '1 hour') >= 300 then
+    return;
+  end if;
+  insert into client_errors (user_id, message, stack, path, source, release, user_agent)
+  values (u, v_msg, left(p_stack, 4000), left(p_path, 300),
+          case when p_source in ('boundary', 'window', 'promise', 'api', 'chunk') then p_source else 'window' end,
+          left(p_release, 40), left(p_agent, 300));
+  if random() < 0.02 then delete from client_errors where created_at < now() - interval '30 days'; end if;
+end $$;
+
+-- ერთნაირი შეცდომები ერთად: რამდენჯერ, რამდენ ადამიანთან, ბოლო მისამართი და დეტალები
+create or replace function public.admin_errors(p_days int default 7)
+returns table (message text, source text, events bigint, users bigint, first_at timestamptz, last_at timestamptz,
+               path text, stack text, release text, user_agent text)
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  return query
+  select e.message,
+    (array_agg(e.source order by e.created_at desc))[1],
+    count(*), count(distinct e.user_id), min(e.created_at), max(e.created_at),
+    (array_agg(e.path order by e.created_at desc))[1],
+    (array_agg(e.stack order by e.created_at desc) filter (where e.stack is not null))[1],
+    (array_agg(e.release order by e.created_at desc))[1],
+    (array_agg(e.user_agent order by e.created_at desc))[1]
+  from client_errors e
+  where e.created_at > now() - make_interval(days => greatest(1, least(coalesce(p_days, 7), 30)))
+  group by e.message
+  order by max(e.created_at) desc
+  limit 100;
+end $$;
+
+-- „მოგვარებულია“: ამ შეცდომის ყველა ჩანაწერი იშლება
+create or replace function public.admin_clear_errors(p_message text)
+returns int language plpgsql security definer set search_path = public as $$
+declare n int;
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  delete from client_errors where message = p_message;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- საძიებო სისტემები: sitemap.xml-ის სია (api/sitemap.js). მხოლოდ საჯარო:
+-- ღია პროფილები, აქტიური განცხადებები და მომავალი ღია შეხვედრები.
+-- ---------------------------------------------------------------------
+create or replace function public.sitemap_entries()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'u', coalesce((select jsonb_agg(a.username) from (
+           select p.username from profiles p
+            where p.onboarded and not p.is_private and p.username is not null
+              and (p.banned_until is null or p.banned_until < now())
+            order by p.followers_count desc, p.created_at desc limit 5000) a), '[]'),
+    'm', coalesce((select jsonb_agg(jsonb_build_array(b.id, b.changed)) from (
+           select l.id, greatest(l.updated_at, coalesce(l.bumped_at, l.updated_at)) changed
+             from listings l join profiles s on s.id = l.seller_id
+            where l.status = 'active' and not l.hidden and (s.banned_until is null or s.banned_until < now())
+            order by coalesce(l.bumped_at, l.created_at) desc limit 3000) b), '[]'),
+    'e', coalesce((select jsonb_agg(jsonb_build_array(c.id, c.created_at)) from (
+           select e.id, e.created_at from events e left join groups g on g.id = e.group_id
+            where coalesce(e.ends_at, e.starts_at) > now() and (e.group_id is null or g.privacy = 'public')
+            order by e.starts_at limit 1000) c), '[]'));
+$$;
+grant execute on function public.sitemap_entries() to anon, authenticated;
+
+-- =====================================================================
+-- ეტაპი C: ვის გამოიწერო, მიმაგრებული პოსტი, მონახაზები, დადასტურებული ნიშანი, ქართული ძებნა
+-- =====================================================================
+alter table public.profiles add column if not exists verified boolean not null default false;
+alter table public.profiles add column if not exists pinned_post_id uuid references public.posts on delete set null;
+
+-- მომხმარებელი პირდაპირ ვერ შეცვლის: მთვლელებს, როლს, შეზღუდვას, მომწვევს, ნიშანს და მიმაგრებულ პოსტს
+-- (ამათ მხოლოდ შესაბამისი ფუნქციები ცვლიან)
+create or replace function public.protect_profile_counters()
+returns trigger language plpgsql as $$
+begin
+  if current_user in ('authenticated', 'anon') then
+    new.followers_count := old.followers_count;
+    new.following_count := old.following_count;
+    new.posts_count := old.posts_count;
+    new.role := old.role;
+    new.banned_until := old.banned_until;
+    new.ban_reason := old.ban_reason;
+    new.invited_by := old.invited_by;
+    new.verified := old.verified;
+    new.pinned_post_id := old.pinned_post_id;
+  end if;
+  return new;
+end $$;
+drop trigger if exists profiles_protect on public.profiles;
+create trigger profiles_protect before update on public.profiles
+  for each row execute function public.protect_profile_counters();
+
+-- ---- დადასტურებული ნიშანი: მხოლოდ ადმინი ანიჭებს
+create or replace function public.admin_set_verified(p_user uuid, p_on boolean)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (select 1 from profiles where id = auth.uid() and role = 'admin') then raise exception 'forbidden'; end if;
+  update profiles set verified = coalesce(p_on, false) where id = p_user;
+end $$;
+
+-- ---- მიმაგრებული პოსტი: საკუთარი, მთავარი (არა პასუხი), ჯგუფის გარეთ. p_post = null — მოხსნა
+create or replace function public.pin_post(p_post uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then raise exception 'not signed in'; end if;
+  if p_post is not null and not exists (
+    select 1 from posts where id = p_post and author_id = auth.uid() and parent_id is null and group_id is null and not hidden
+  ) then raise exception 'ამ პოსტს პროფილზე ვერ მიამაგრებ'; end if;
+  update profiles set pinned_post_id = p_post where id = auth.uid();
+end $$;
+
+-- ---- მონახაზები: ტექსტი და გამოკითხვა, ყველა მოწყობილობაზე. მაქსიმუმ 50
+create table if not exists public.drafts (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references public.profiles on delete cascade,
+  body text not null default '' check (char_length(body) <= 2000),
+  poll jsonb,
+  group_id uuid references public.groups on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists drafts_user_idx on public.drafts (user_id, updated_at desc);
+alter table public.drafts enable row level security;
+drop policy if exists "own drafts" on public.drafts;
+create policy "own drafts" on public.drafts for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+grant select, insert, update, delete on public.drafts to authenticated;
+
+create or replace function public.drafts_guard()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' and (select count(*) from drafts where user_id = new.user_id) >= 50 then
+    raise exception 'მონახაზი მაქსიმუმ 50 შეიძლება — ძველები წაშალე';
+  end if;
+  if tg_op = 'UPDATE' then new.user_id := old.user_id; new.created_at := old.created_at; end if;
+  new.updated_at := now();
+  return new;
+end $$;
+drop trigger if exists drafts_guard on public.drafts;
+create trigger drafts_guard before insert or update on public.drafts
+  for each row execute function public.drafts_guard();
+
+-- ---- ვის გამოიწერო: მიზეზით (გამოგიწერა, კლასელი, საერთო მეგობრები, სკოლა, ქალაქი…). „არ მაინტერესებს“ ინახება
+create table if not exists public.suggestion_dismissals (
+  user_id uuid not null default auth.uid() references public.profiles on delete cascade,
+  dismissed_id uuid not null references public.profiles on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (user_id, dismissed_id)
+);
+alter table public.suggestion_dismissals enable row level security;
+drop policy if exists "own dismissals" on public.suggestion_dismissals;
+create policy "own dismissals" on public.suggestion_dismissals for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+grant select, insert, delete on public.suggestion_dismissals to authenticated;
+
+create or replace function public.dismiss_suggestion(p_user uuid)
+returns void language sql security definer set search_path = public as $$
+  insert into suggestion_dismissals (user_id, dismissed_id) select auth.uid(), p_user where auth.uid() is not null
+  on conflict do nothing;
+$$;
+
+create or replace function public.who_to_follow(p_limit int default 12)
+returns jsonb language sql stable security definer set search_path = public as $$
+  with me as (select * from profiles where id = auth.uid()),
+  fof as (
+    select f2.following_id as id, count(*) as n, min(f1.following_id::text)::uuid as via
+      from follows f1 join follows f2 on f2.follower_id = f1.following_id
+     where f1.follower_id = auth.uid()
+     group by f2.following_id
+  ),
+  cand as (
+    select p.*, coalesce(fof.n, 0) as mutual, fof.via,
+      exists (select 1 from follows x where x.follower_id = p.id and x.following_id = me.id) as follows_me,
+      (coalesce(me.school, '') <> '' and lower(p.school) = lower(me.school)) as same_school,
+      (coalesce(me.school, '') <> '' and lower(p.school) = lower(me.school) and p.grad_year = me.grad_year) as classmate,
+      (coalesce(me.city, '') <> '' and lower(p.city) = lower(me.city)) as same_city,
+      (p.id = me.invited_by or p.invited_by = me.id) as invite
+    from profiles p cross join me left join fof on fof.id = p.id
+    where p.id <> me.id and p.onboarded and (p.banned_until is null or p.banned_until < now())
+      and not exists (select 1 from follows f where f.follower_id = me.id and f.following_id = p.id)
+      and not exists (select 1 from follow_requests r where r.requester_id = me.id and r.target_id = p.id)
+      and not exists (select 1 from suggestion_dismissals d where d.user_id = me.id and d.dismissed_id = p.id)
+      and not public.is_blocked(me.id, p.id)
+  ),
+  ranked as (
+    select c.*,
+      (case when c.follows_me then 100 else 0 end) + (case when c.invite then 60 else 0 end)
+      + (case when c.classmate then 40 when c.same_school then 25 else 0 end)
+      + least(c.mutual, 10) * 8 + (case when c.same_city then 8 else 0 end)
+      + ln(1 + c.followers_count) + (case when c.created_at > now() - interval '14 days' then 3 else 0 end) as score
+    from cand c
+    order by score desc, c.followers_count desc
+    limit greatest(1, least(coalesce(p_limit, 12), 50))
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+      'id', r.id, 'username', r.username, 'full_name', r.full_name, 'avatar_url', r.avatar_url, 'last_seen', r.last_seen,
+      'verified', r.verified, 'city', r.city, 'school', r.school, 'grad_year', r.grad_year, 'followers_count', r.followers_count,
+      'reason', case when r.follows_me then 'follows_you' when r.invite then 'invite' when r.classmate then 'classmate'
+                     when r.mutual > 0 then 'mutual' when r.same_school then 'school' when r.same_city then 'city'
+                     when r.created_at > now() - interval '14 days' then 'new' else 'popular' end,
+      'mutual', r.mutual,
+      'via', (select coalesce(nullif(v.full_name, ''), v.username) from profiles v where v.id = r.via))
+    order by r.score desc, r.followers_count desc), '[]'::jsonb)
+  from ranked r;
+$$;
+
+-- ---- ქართული ძებნა: „გიორგი“ = „giorgi“, „beridze“ = „ბერიძე“, „ჭავჭავაძე“ = „chavchavadze“, უმნიშვნელო შეცდომებიც
+-- ორივე დამწერლობა ერთ ფორმაზე მიდის; მსგავსი ბგერები ერთდება (თ/ტ, კ/ქ/ყ, პ/ფ, ჩ/ჭ, ც/წ).
+-- იგივე წესი აპშია: src/lib/translit.js (ტესტები ამოწმებს, რომ ერთნაირად მუშაობს)
+create schema if not exists extensions;
+create extension if not exists pg_trgm with schema extensions;
+grant usage on schema extensions to anon, authenticated, service_role;
+
+create or replace function public.ka_skeleton(p text)
+returns text language sql immutable parallel safe as $$
+  select translate(
+    replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(
+      lower(coalesce(p, '')),
+      'ch''', 'č'), 'chh', 'č'), 'ch', 'č'), 'sh', 'š'), 'zh', 'ž'), 'kh', 'x'), 'gh', 'ğ'), 'dz', 'đ'),
+      'ts''', 'c'), 'tz', 'c'), 'ts', 'c'), 'th', 't'), 'ph', 'p'), '''', ''),
+    'აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰqywf',
+    'abgdevztiklmnopžrstupkğkščcđcčxjhkkcp');
+$$;

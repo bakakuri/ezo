@@ -445,7 +445,7 @@ export const api = {
       sb.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', uid()).eq('read', false),
       sb.rpc('my_conversations'),
     ])
-    return { notifications: n.count || 0, messages: (convs.data || []).filter((c) => c.unread).length }
+    return { notifications: n.count || 0, messages: (convs.data || []).filter((c) => c.unread && !c.muted).length }
   },
   subscribeNotifications(cb) {
     const ch = pgChannel(`notif:${uid()}`)
@@ -471,9 +471,33 @@ export const api = {
     }
     return c
   },
-  async messages(convId) {
+  // around — ძებნიდან: ამ მესიჯის გარშემო (60 წინ, 60 შემდეგ)
+  async messages(convId, { around } = {}) {
+    if (around) {
+      const t = ok(await sb.from('messages').select('id,created_at').eq('conversation_id', convId).eq('id', around).maybeSingle())
+      if (t) {
+        const [before, after] = await Promise.all([
+          sb.from('messages').select(MSG).eq('conversation_id', convId).lte('created_at', t.created_at).order('created_at', { ascending: false }).limit(60),
+          sb.from('messages').select(MSG).eq('conversation_id', convId).gt('created_at', t.created_at).order('created_at', { ascending: true }).limit(60),
+        ])
+        const list = [...ok(before).reverse(), ...ok(after)]
+        list.hasNewer = ok(after).length === 60
+        return list
+      }
+    }
     const rows = ok(await sb.from('messages').select(MSG).eq('conversation_id', convId).order('created_at', { ascending: false }).limit(150))
     return rows.reverse()
+  },
+  // ---- ეტაპი I: ძებნა, მიმაგრება/დადუმება, ქრებადი მესიჯები, გამოკითხვა
+  async searchMessages(q, convId = null) { return ok(await sb.rpc('search_messages', { p_q: q, p_conv: convId })) },
+  async setChatPrefs(convId, { pin = null, muteHours = null } = {}) {
+    return ok(await sb.rpc('set_chat_prefs', { p_conv: convId, p_pin: pin, p_mute_hours: muteHours }))
+  },
+  async setDisappearing(convId, hours) { ok(await sb.rpc('set_disappearing', { p_conv: convId, p_hours: hours })) },
+  async chatPollVotes(convId) { return ok(await sb.from('chat_poll_votes').select('message_id,user_id,option').eq('conversation_id', convId)) },
+  async voteChatPoll(messageId, options) { ok(await sb.rpc('vote_chat_poll', { p_msg: messageId, p_options: options })) },
+  async sendChatPoll(convId, { question, options, multi = false }) {
+    return this.send(convId, { body: question, meta: { poll: { options, multi } } })
   },
   async send(convId, { body = '', media_url = null, media_type = null, reply_to = null, meta = {} }) {
     return ok(await sb.from('messages').insert({ conversation_id: convId, sender_id: uid(), body, media_url, media_type, reply_to, meta }).select(MSG).single())
@@ -485,6 +509,9 @@ export const api = {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${convId}` }, (p) => cb({ kind: 'message:update', row: p.new }))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'message_reactions', filter: `conversation_id=eq.${convId}` }, (p) => {
         cb(p.eventType === 'DELETE' ? { kind: 'reaction:remove', row: p.old } : { kind: 'reaction:set', row: p.new })
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_poll_votes', filter: `conversation_id=eq.${convId}` }, (p) => {
+        cb(p.eventType === 'DELETE' ? { kind: 'poll:unvote', row: p.old } : { kind: 'poll:vote', row: p.new })
       })
       .subscribe()
     return () => sb.removeChannel(ch)
@@ -670,6 +697,10 @@ export const api = {
   },
   async stats(userId) {
     return ok(await sb.from('game_stats').select('*').eq('user_id', userId))
+  },
+  // რეიტინგი: period 'season' | 'all', scope 'all' | 'friends' (იხ. game_board)
+  async gameBoard(type, period = 'season', scope = 'all') {
+    return ok(await sb.rpc('game_board', { p_type: type, p_period: period, p_scope: scope }))
   },
   async leaderboard(type) {
     return ok(await sb.from('game_stats').select(`*, p:profiles(${PERSON})`).eq('type', type).order('rating', { ascending: false }).limit(20))

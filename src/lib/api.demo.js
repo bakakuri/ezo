@@ -184,6 +184,7 @@ const notifications = [
   { id: 'n2', type: 'follow', actor_id: 'u3', created: 40 },
   { id: 'n3', type: 'gift', actor_id: 'u5', created: 70 },
   { id: 'n_mention', type: 'mention', actor_id: 'u4', post_id: 'p12', created: 45 },
+  { id: 'n_season', type: 'season_end', data: { season: '2026-09-01', type: 'nardi', place: 2, rating: 1352, league: 'gold', coins: 60, games: 14 }, created: 60 * 24 * 14, read: true },
   { id: 'n4', type: 'reply', actor_id: 'u2', post_id: 'p9', created: 120 },
   { id: 'n5', type: 'game_invite', actor_id: 'u2', created: 160 },
   { id: 'n6', type: 'match', actor_id: 'u6', created: 400, read: true },
@@ -209,11 +210,14 @@ const convs = [
     ['u2', 'ბროწეული ძალიან კარგად გამოვიდა', 85],
     ['u1', 'პარასკევს ვხვდებით?', 40],
     ['me', 'კი, 7-ზე', 35, {}, 3],
+    ['u5', 'სად შევხვდეთ პარასკევს?', 20, { poll: { options: ['ვაკის პარკი', 'კაფე „ეზო“', 'ჩემთან'], multi: false } }],
   ] },
 ]
 const conversations = new Map()
 const messages = new Map()
 const reactions = [] // { message_id, user_id, emoji }
+const pollVotes = [] // { message_id, conversation_id, user_id, option }
+const chatPrefs = new Map() // convId → { pinned_at, muted_until }
 for (const c of convs) {
   const list = []
   for (const [snd, body, min, meta = {}, replyIdx] of c.msgs) {
@@ -221,6 +225,10 @@ for (const c of convs) {
   }
   messages.set(c.id, list)
   conversations.set(c.id, { id: c.id, kind: c.kind, other: c.other, title: c.title, members: c.members || ['me', c.other], read_at: c.id === 'c1' || c.id === 'c4' ? ago(100) : ago(0) })
+}
+{
+  const poll = messages.get('c4').find((m) => m.meta?.poll)
+  pollVotes.push({ message_id: poll.id, conversation_id: 'c4', user_id: 'u2', option: 0 }, { message_id: poll.id, conversation_id: 'c4', user_id: 'u1', option: 0 }, { message_id: poll.id, conversation_id: 'c4', user_id: 'u5', option: 1 })
 }
 reactions.push({ message_id: messages.get('c4')[1].id, user_id: 'u2', emoji: '🔥' }, { message_id: messages.get('c4')[1].id, user_id: 'u1', emoji: '🔥' }, { message_id: messages.get('c1')[1].id, user_id: 'u1', emoji: '❤️' })
 const msgView = (m) => {
@@ -231,7 +239,8 @@ const msgView = (m) => {
 }
 const lastText = (m) => (m.deleted_at ? 'წაშლილი მესიჯი' : m.media_type === 'image' ? '📷 ფოტო' : m.media_type === 'audio' ? '🎙 ხმოვანი'
   : m.meta?.call ? (['missed', 'declined', 'busy'].includes(m.meta.call.status) ? '📞 გამოტოვებული ზარი' : '📞 ზარი')
-  : m.meta?.story ? `↩ სთორზე: ${m.body}` : m.meta?.listing ? `🏷 ${m.body}` : m.body)
+  : m.meta?.poll ? `📊 ${m.body}` : m.meta?.story ? `↩ სთორზე: ${m.body}` : m.meta?.listing ? `🏷 ${m.body}` : m.body)
+const alive = (m) => !m.expires_at || Date.parse(m.expires_at) > Date.now()
 
 // ---- ზარები დემოში: სხვა ჩანართთან BroadcastChannel-ით, ან სიმულაცია
 const calls = new Map()
@@ -797,14 +806,16 @@ export const api = {
   async markNotificationsRead() { notifications.forEach((n) => { n.read = true }); emit('notif', null) },
   async unreadCounts() {
     const list = await this.conversations()
-    return { notifications: notifications.filter((n) => !n.read).length, messages: list.filter((c) => c.unread).length }
+    return { notifications: notifications.filter((n) => !n.read).length, messages: list.filter((c) => c.unread && !c.muted).length }
   },
   subscribeNotifications(cb) { return on('notif', cb) },
 
   async conversations() {
     return [...conversations.values()].filter((c) => c.members.includes(ME)).map((c) => {
-      const list = messages.get(c.id)
+      const list = messages.get(c.id).filter(alive)
       const last = list[list.length - 1]
+      const pr = chatPrefs.get(c.id) || {}
+      const muted = Boolean(pr.muted_until && (pr.muted_until === 'forever' || Date.parse(pr.muted_until) > Date.now()))
       const others = c.members.filter((u) => u !== ME)
       return {
         id: c.id, kind: c.kind, updated_at: last?.created_at || ago(0),
@@ -814,8 +825,10 @@ export const api = {
         other: c.kind === 'group' ? null : person(others[0]),
         title: c.title || null, avatar_url: null, my_role: c.kind === 'group' && c.members[0] === ME ? 'admin' : 'member',
         members_count: c.members.length, members: others.slice(0, 3).map(person),
+        pinned: Boolean(pr.pinned_at), pinned_at: pr.pinned_at || null, muted, mute_forever: muted && pr.muted_until === 'forever',
+        muted_until: muted && pr.muted_until !== 'forever' ? pr.muted_until : null, disappear_hours: c.disappear || null,
       }
-    }).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+    }).sort((a, b) => (b.pinned_at || '').localeCompare(a.pinned_at || '') || b.updated_at.localeCompare(a.updated_at))
   },
   async openDM(userId) {
     const found = [...conversations.values()].find((c) => c.kind !== 'group' && c.members.includes(userId) && c.members.includes(ME))
@@ -826,18 +839,37 @@ export const api = {
     return id
   },
   async conversation(id) { return (await this.conversations()).find((c) => c.id === id) || null },
-  async messages(id) { await wait(100); return (messages.get(id) || []).map(msgView) },
+  async messages(id) { await wait(100); return (messages.get(id) || []).filter(alive).map(msgView) },
   async send(convId, { body = '', media_url = null, media_type = null, reply_to = null, meta = {} }) {
-    const m = { id: nid('m'), conversation_id: convId, sender_id: ME, body, media_url, media_type, reply_to, meta, deleted_at: null, created_at: new Date().toISOString() }
+    const conv = conversations.get(convId)
+    if (meta?.poll) {
+      if (conv.kind !== 'group') throw new Error('გამოკითხვა მხოლოდ ჯგუფურ ჩატშია')
+      const options = (meta.poll.options || []).map((o) => String(o).trim()).filter(Boolean)
+      if (!body.trim() || options.length < 2 || options.length > 10) throw new Error('გამოკითხვას სჭირდება კითხვა და 2–10 პასუხი')
+      meta = { poll: { options, multi: Boolean(meta.poll.multi) } }
+    }
+    const expires = conv.disappear && !meta?.system ? new Date(Date.now() + conv.disappear * 3600e3).toISOString() : null
+    const m = { id: nid('m'), conversation_id: convId, sender_id: ME, body, media_url, media_type, reply_to, meta, deleted_at: null, created_at: new Date().toISOString(), expires_at: expires }
     messages.get(convId).push(m)
     emit(`conv:${convId}`, { kind: 'message:new', row: m })
     emit('notif', null)
     const c = conversations.get(convId)
     const replier = c.members.filter((u) => u !== ME)[Math.floor(Math.random() * (c.members.length - 1))]
+    if (meta?.system) return msgView(m)
+    if (meta?.poll) {
+      // დემოში მეგობრები ხმას აძლევენ
+      c.members.filter((u) => u !== ME).forEach((u, i) => setTimeout(() => {
+        const v = { message_id: m.id, conversation_id: convId, user_id: u, option: Math.floor(Math.random() * meta.poll.options.length) }
+        pollVotes.push(v)
+        emit(`conv:${convId}`, { kind: 'poll:vote', row: v })
+      }, 1200 + i * 900))
+      return msgView(m)
+    }
     setTimeout(() => emit(`typing:${convId}`, true), 600)
     setTimeout(() => {
       const pool = meta?.listing ? MARKET_REPLIES : REPLIES
-      const r = { id: nid('m'), conversation_id: convId, sender_id: replier, body: pool[Math.floor(Math.random() * pool.length)], media_url: null, media_type: null, reply_to: null, meta: {}, deleted_at: null, created_at: new Date().toISOString() }
+      const r = { id: nid('m'), conversation_id: convId, sender_id: replier, body: pool[Math.floor(Math.random() * pool.length)], media_url: null, media_type: null, reply_to: null, meta: {}, deleted_at: null, created_at: new Date().toISOString(),
+        expires_at: c.disappear ? new Date(Date.now() + c.disappear * 3600e3).toISOString() : null }
       messages.get(convId).push(r)
       emit(`typing:${convId}`, false)
       emit(`conv:${convId}`, { kind: 'message:new', row: r })
@@ -851,6 +883,59 @@ export const api = {
     return msgView(m)
   },
   subscribeMessages(convId, cb) { return on(`conv:${convId}`, cb) },
+  async searchMessages(q, convId = null) {
+    await wait(150)
+    if (skeleton(q.trim()).length < 2) return []
+    const out = []
+    for (const c of conversations.values()) {
+      if (!c.members.includes(ME) || (convId && c.id !== convId)) continue
+      for (const m of messages.get(c.id)) {
+        if (!m.deleted_at && alive(m) && m.body && !m.meta?.system && matches(m.body, q)) {
+          out.push({ id: m.id, conversation_id: c.id, sender_id: m.sender_id, body: m.body, created_at: m.created_at, kind: c.kind, title: c.title || null,
+            sender: person(m.sender_id), other: c.kind === 'group' ? null : person(c.members.find((u) => u !== ME)) })
+        }
+      }
+    }
+    return out.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 50)
+  },
+  async setChatPrefs(convId, { pin = null, muteHours = null } = {}) {
+    const pr = { ...(chatPrefs.get(convId) || {}) }
+    if (pin !== null) {
+      if (pin && !pr.pinned_at && [...chatPrefs.values()].filter((x) => x.pinned_at).length >= 5) throw new Error('მიმაგრება შეიძლება მაქსიმუმ 5 ჩატის')
+      pr.pinned_at = pin ? pr.pinned_at || new Date().toISOString() : null
+    }
+    if (muteHours !== null) pr.muted_until = muteHours === 0 ? null : muteHours < 0 ? 'forever' : new Date(Date.now() + muteHours * 3600e3).toISOString()
+    chatPrefs.set(convId, pr)
+    emit('notif', null)
+    const c = (await this.conversations()).find((x) => x.id === convId)
+    return { pinned: c.pinned, muted: c.muted, mute_forever: c.mute_forever, muted_until: c.muted_until }
+  },
+  async setDisappearing(convId, hours) {
+    const c = conversations.get(convId)
+    if (c.kind === 'group' && c.members[0] !== ME) throw new Error('ჯგუფურ ჩატში ამას მხოლოდ ადმინი ცვლის')
+    if ((c.disappear || null) === (hours || null)) return
+    c.disappear = hours || null
+    await this.send(convId, { body: !hours ? 'გამორთო ქრებადი მესიჯები' : hours === 24 ? 'ჩართო ქრებადი მესიჯები: ახალი მესიჯები ქრება 24 საათში' : 'ჩართო ქრებადი მესიჯები: ახალი მესიჯები ქრება 7 დღეში', meta: { system: true, disappear: hours || null } })
+  },
+  async chatPollVotes(convId) { return pollVotes.filter((v) => v.conversation_id === convId).map(({ message_id, user_id, option }) => ({ message_id, user_id, option })) },
+  async voteChatPoll(messageId, options) {
+    const m = [...messages.values()].flat().find((x) => x.id === messageId)
+    if (!m?.meta?.poll) throw new Error('გამოკითხვა ვერ მოიძებნა')
+    const opts = [...new Set(options)].sort()
+    if (!m.meta.poll.multi && opts.length > 1) throw new Error('აქ მხოლოდ ერთი პასუხი შეიძლება')
+    for (let i = pollVotes.length - 1; i >= 0; i--) {
+      const v = pollVotes[i]
+      if (v.message_id === messageId && v.user_id === ME && !opts.includes(v.option)) { pollVotes.splice(i, 1); emit(`conv:${m.conversation_id}`, { kind: 'poll:unvote', row: v }) }
+    }
+    for (const o of opts) {
+      if (!pollVotes.some((v) => v.message_id === messageId && v.user_id === ME && v.option === o)) {
+        const v = { message_id: messageId, conversation_id: m.conversation_id, user_id: ME, option: o }
+        pollVotes.push(v)
+        emit(`conv:${m.conversation_id}`, { kind: 'poll:vote', row: v })
+      }
+    }
+  },
+  async sendChatPoll(convId, { question, options, multi = false }) { return this.send(convId, { body: question, meta: { poll: { options, multi } } }) },
   async react(messageId, emoji) {
     const i = reactions.findIndex((r) => r.message_id === messageId && r.user_id === ME)
     if (i >= 0) reactions.splice(i, 1)
@@ -1092,6 +1177,26 @@ export const api = {
     return { correct: true, solved: false, reply: p.solution[n] }
   },
   async stats(userId = ME) { return userId === ME ? [...stats.entries()].filter(([k]) => k.startsWith('me:')).map(([, v]) => v) : [] },
+  async gameBoard(type, period = 'season', scope = 'all') {
+    await wait(160)
+    const all = await this.leaderboard(type)
+    const d = new Date()
+    const season = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`
+    const ends = new Date(d.getFullYear(), d.getMonth() + 1, 1).toISOString()
+    const games = { u2: 31, u7: 24, u1: 18, [ME]: 9, u3: 4, u5: 12 }
+    const pool = all.filter((r) => scope !== 'friends' || ['u2', 'u1', ME].includes(r.user_id)).map((r) => {
+      const g = period === 'season' ? games[r.user_id] || 6 : r.wins + r.losses + r.draws
+      const rating = period === 'season' ? 1200 + Math.round((r.rating - 1200) / 2) + (r.user_id === ME ? 34 : 18) : r.rating
+      const league = period === 'season' ? (rating >= 1700 ? 'diamond' : rating >= 1500 ? 'platinum' : rating >= 1300 ? 'gold' : rating >= 1100 ? 'silver' : 'bronze') : null
+      return { user_id: r.user_id, rating, games: g, wins: Math.round(g * 0.6), losses: g - Math.round(g * 0.6), draws: 0, league, provisional: period === 'season' && g < 5, p: r.p }
+    }).sort((a, b) => b.rating - a.rating).map((r, i) => ({ ...r, pos: i + 1 }))
+    const mine = stats.get(`me:${type}`)
+    return {
+      period, scope, type, season, ends_at: ends, rows: pool, me: pool.find((r) => r.user_id === ME) || null,
+      champions: period === 'season' ? ['u7', 'u2', 'u1'].map((id, i) => ({ place: i + 1, rating: 1390 - i * 41, league: 'gold', p: person(id) })) : [],
+      start: 1200 + Math.round(((mine?.rating || 1200) - 1200) / 2),
+    }
+  },
   async leaderboard(type) {
     const base = { nardi: 1320, chess: 1460, checkers: 1290, domino: 1250, longnardi: 1305, durak: 1270, joker: 1340 }[type] || 1250
     return ['u2', 'u7', 'u1', ME, 'u3', 'u5'].map((id, i) => ({
