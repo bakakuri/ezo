@@ -1,4 +1,5 @@
 import { Component } from 'react'
+import { reportError } from '../lib/errors.js'
 
 // თეთრი ეკრანის ნაცვლად: რა მოხდა და რა ქნას ადამიანმა. resetKey-ის შეცვლისას (სხვა გვერდზე გადასვლა) თავიდან ცდის.
 export class ErrorBoundary extends Component {
@@ -10,6 +11,8 @@ export class ErrorBoundary extends Component {
 
   componentDidCatch(error, info) {
     console.error('ezo:', error, info?.componentStack)
+    const where = (info?.componentStack || '').trim().split('\n').slice(0, 8).map((l) => l.trim()).join('\n')
+    reportError(error, 'boundary', where && `კომპონენტები:\n${where}`)
   }
 
   componentDidUpdate(prev) {

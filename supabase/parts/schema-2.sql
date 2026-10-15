@@ -1,24 +1,5 @@
 -- ეზო — სქემის ნაწილი 2/8. გაუშვი 1-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.get_or_create_dm(p_other uuid)
-returns uuid language plpgsql security definer set search_path = public as $$
-declare v_id uuid;
-begin
-  if auth.uid() is null or p_other = auth.uid() then raise exception 'invalid'; end if;
-  if public.is_blocked(auth.uid(), p_other) then raise exception 'blocked'; end if;
-  select c.id into v_id from conversations c
-    join conversation_members a on a.conversation_id = c.id and a.user_id = auth.uid()
-    join conversation_members b on b.conversation_id = c.id and b.user_id = p_other
-    where c.kind in ('dm', 'dating')
-    order by c.kind = 'dm' desc
-    limit 1;
-  if v_id is null then
-    insert into conversations (kind) values ('dm') returning id into v_id;
-    insert into conversation_members (conversation_id, user_id) values (v_id, auth.uid()), (v_id, p_other);
-  end if;
-  return v_id;
-end $$;
-
 drop function if exists public.my_conversations();
 create or replace function public.my_conversations()
 returns table (id uuid, kind text, updated_at timestamptz, last_message text, last_sender uuid, unread boolean, other jsonb,
@@ -440,4 +421,16 @@ returns setof public.posts language sql stable security invoker set search_path 
     and not public.is_blocked(auth.uid(), p.author_id)
   order by (p.like_count + p.reply_count * 2 + 1) / power(extract(epoch from now() - p.created_at) / 3600 + 2, 1.1) desc
   limit p_limit;
+$$;
+
+-- სტუმრები
+create or replace function public.record_visit(p_profile uuid)
+returns void language sql security definer set search_path = public as $$
+  insert into profile_visits (profile_id, visitor_id) values (p_profile, auth.uid())
+  on conflict (profile_id, visitor_id) do update set visited_at = now();
+$$;
+
+create or replace function public.touch_last_seen()
+returns void language sql security definer set search_path = public as $$
+  update profiles set last_seen = now() where id = auth.uid();
 $$;

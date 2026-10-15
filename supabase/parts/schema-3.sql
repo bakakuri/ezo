@@ -1,17 +1,5 @@
 -- ეზო — სქემის ნაწილი 3/8. გაუშვი 2-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- სტუმრები
-create or replace function public.record_visit(p_profile uuid)
-returns void language sql security definer set search_path = public as $$
-  insert into profile_visits (profile_id, visitor_id) values (p_profile, auth.uid())
-  on conflict (profile_id, visitor_id) do update set visited_at = now();
-$$;
-
-create or replace function public.touch_last_seen()
-returns void language sql security definer set search_path = public as $$
-  update profiles set last_seen = now() where id = auth.uid();
-$$;
-
 create or replace function public.suggested_people(p_limit int default 12)
 returns setof public.profiles language sql stable security definer set search_path = public as $$
   with me as (select * from profiles where id = auth.uid())
@@ -390,3 +378,18 @@ end $$;
 drop trigger if exists games_push on public.games;
 create trigger games_push after update on public.games
   for each row execute function public.on_game_push();
+
+-- ---------------------------------------------------------------------
+-- v2 RLS
+-- ---------------------------------------------------------------------
+alter table public.push_subscriptions enable row level security;
+alter table public.app_secrets enable row level security;
+alter table public.game_private enable row level security;
+alter table public.game_hands enable row level security;
+
+drop policy if exists "push own" on public.push_subscriptions;
+create policy "push own" on public.push_subscriptions for all to authenticated
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+drop policy if exists "hands own" on public.game_hands;
+create policy "hands own" on public.game_hands for select to authenticated using (user_id = auth.uid());
+-- app_secrets და game_private: პოლიტიკა არ არის — მხოლოდ სერვერი (service role)

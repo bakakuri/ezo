@@ -1,6 +1,7 @@
 import { supabase as sb } from './supabase.js'
 import { groupStories } from './groupStories.js'
 import { withMyHand, HIDDEN } from '../games/server.js'
+import { isSchemaError, reportApiError } from './errors.js'
 
 // Supabase-ზე მომუშავე API. ინტერფეისი ზუსტად ემთხვევა api.demo.js-ს.
 
@@ -66,7 +67,10 @@ async function gameFn(body) {
 }
 const uid = () => me
 const ok = ({ data, error }) => {
-  if (error) throw new Error(humanError(error.message))
+  if (error) {
+    if (isSchemaError(error)) reportApiError(error)
+    throw new Error(humanError(error.message))
+  }
   return data
 }
 
@@ -883,4 +887,11 @@ export const api = {
   },
   async adminBan(userId, days = null, note = null) { ok(await sb.rpc('admin_ban', { p_user: userId, p_days: days, p_note: note })) },
   async adminUnban(userId) { ok(await sb.rpc('admin_unban', { p_user: userId })) },
+
+  // შეცდომების ჟურნალი (ჩაწერისას შეცდომა არ ისვრის — ჟურნალი აპს არ უნდა შეეხოს)
+  async logError(e) {
+    await sb.rpc('log_client_error', { p_message: e.message, p_stack: e.stack, p_path: e.path, p_source: e.source, p_release: e.release, p_agent: e.agent })
+  },
+  async adminErrors(days = 7) { return ok(await sb.rpc('admin_errors', { p_days: days })) },
+  async adminClearErrors(message) { return ok(await sb.rpc('admin_clear_errors', { p_message: message })) },
 }

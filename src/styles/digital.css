@@ -1116,3 +1116,22 @@ a.level-chip:active { transform: scale(0.94); }
 .crash p { color: var(--ink-2); font-size: var(--t-sm); }
 .crash code { display: block; width: 100%; padding: 10px 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--glass-line); font-size: 12px; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
 .crash-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ---------------- ადმინი: შეცდომების ჟურნალი ---------------- */
+.tab-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 6px; border-radius: 9px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 800; line-height: 1; vertical-align: 1px; }
+.admin-filter { padding: 12px 16px 6px; }
+.nowrap { white-space: nowrap; }
+.err-card { border-bottom: 1px solid var(--line); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; content-visibility: auto; contain-intrinsic-size: auto 200px; }
+.err-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--t-sm); }
+.err-meta .count { background: var(--accent-soft); color: var(--accent); font-weight: 800; font-size: 12px; padding: 2px 8px; border-radius: 999px; }
+.err-meta .grow-end { margin-left: auto; }
+.err-src { font-weight: 700; color: var(--ink-2); }
+.err-src.api, .err-src.boundary { color: var(--accent); }
+.err-src.chunk { color: var(--teal); }
+.err-msg { display: block; padding: 10px 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); font-size: 13px; line-height: 1.5; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.err-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; font-size: var(--t-sm); }
+.err-facts dt { color: var(--ink-3); }
+.err-facts dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.err-stack summary { cursor: pointer; width: max-content; font-size: var(--t-sm); font-weight: 700; color: var(--ink-2); }
+.err-stack pre { margin: 8px 0 0; max-height: 260px; overflow: auto; padding: 10px 12px; border-radius: 12px; background: var(--bg-2); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.err-card .acts { display: flex; gap: 8px; }

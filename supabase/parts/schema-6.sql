@@ -1,32 +1,5 @@
 -- ეზო — სქემის ნაწილი 6/8. გაუშვი 5-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ტაიმერი: Supabase-ში ჯერ ჩართე Database → Extensions → pg_cron (თუ ეს ბლოკი ვერ ჩართავს)
-do $$
-begin
-  begin
-    create extension if not exists pg_cron;
-  exception when others then
-    raise notice 'pg_cron მიუწვდომელია — ჩართე Database → Extensions → pg_cron და ფაილი ხელახლა გაუშვი (%)', sqlerrm;
-    return;
-  end;
-  perform cron.schedule('ezo-tournaments', '* * * * *', 'select public.tournament_tick()');
-exception when others then
-  raise notice 'ტურნირების ტაიმერი ვერ ჩაირთო: %', sqlerrm;
-end $$;
-
--- =====================================================================
---  v6: სოციალური — დახურული პროფილი, გამოწერის თხოვნები, გამოკითხვები,
---  შენახული პოსტები და კოლექციები, სთორის ჰაილაითები, „ახლო მეგობრები“
--- =====================================================================
-create table if not exists public.follow_requests (
-  requester_id uuid references public.profiles on delete cascade,
-  target_id uuid references public.profiles on delete cascade,
-  created_at timestamptz not null default now(),
-  primary key (requester_id, target_id),
-  check (requester_id <> target_id)
-);
-create index if not exists follow_requests_target_idx on public.follow_requests (target_id, created_at desc);
-
 -- გამოწერა: ღია პროფილზე — მაშინვე, დახურულზე — თხოვნა
 create or replace function public.follow_user(p_target uuid)
 returns text language plpgsql security definer set search_path = public as $$
@@ -395,3 +368,59 @@ returns jsonb language sql stable security definer set search_path = public as $
     'sold', (select count(*) from listings where seller_id = p_user and status = 'sold'),
     'since', (select created_at from profiles where id = p_user));
 $$;
+
+-- ---- RLS
+alter table public.listings enable row level security;
+alter table public.listing_saves enable row level security;
+alter table public.listing_views enable row level security;
+
+drop policy if exists "listings read" on public.listings;
+drop policy if exists "listings create" on public.listings;
+drop policy if exists "listings update own" on public.listings;
+drop policy if exists "listings delete" on public.listings;
+-- დამალული და დაბლოკილი გამყიდველის განცხადებებს მხოლოდ თვითონ და მოდერატორი ხედავს
+create policy "listings read" on public.listings for select to authenticated using (
+  seller_id = auth.uid() or public.is_staff()
+  or (not hidden and not public.is_blocked(auth.uid(), seller_id)
+      and not exists (select 1 from public.profiles p where p.id = seller_id and p.banned_until > now())));
+create policy "listings create" on public.listings for insert to authenticated
+  with check (seller_id = auth.uid() and public.can_act());
+create policy "listings update own" on public.listings for update to authenticated
+  using (seller_id = auth.uid()) with check (seller_id = auth.uid() and public.can_act());
+create policy "listings delete" on public.listings for delete to authenticated
+  using (seller_id = auth.uid() or public.is_staff());
+
+drop policy if exists "listing saves own" on public.listing_saves;
+create policy "listing saves own" on public.listing_saves for all to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid() and exists (select 1 from public.listings l where l.id = listing_id and l.seller_id <> auth.uid()));
+-- listing_views: პოლიტიკა არ აქვს — მხოლოდ view_listing()-ით
+
+revoke execute on function public.listings_guard() from public, anon, authenticated;
+revoke execute on function public.on_listing_change() from public, anon, authenticated;
+revoke execute on function public.on_listing_save() from public, anon, authenticated;
+
+-- =====================================================================
+--  v8: ქულები და მიღწევები — XP, დონეები, დღიური სერია, „ბროწეული“ (შიდა ვალუტა, ფულით არ იყიდება), ბეჯები
+-- =====================================================================
+create table if not exists public.progress (
+  user_id uuid primary key references public.profiles on delete cascade,
+  xp int not null default 0 check (xp >= 0),
+  coins int not null default 0 check (coins >= 0),
+  streak int not null default 0,
+  best_streak int not null default 0,
+  last_day date,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.progress_events (
+  id bigint generated always as identity primary key,
+  user_id uuid not null references public.profiles on delete cascade,
+  kind text not null,
+  xp int not null default 0,
+  coins int not null default 0,
+  ref text,
+  created_at timestamptz not null default now()
+);
+create index if not exists progress_events_user_idx on public.progress_events (user_id, kind, created_at desc);
+create index if not exists progress_events_week_idx on public.progress_events (created_at, user_id) where xp > 0;

@@ -1,8 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// ვერსია შეცდომების ჟურნალისთვის: Vercel-ზე commit-ის პირველი 7 სიმბოლო
+const RELEASE = (process.env.VERCEL_GIT_COMMIT_SHA || process.env.GITHUB_SHA || '').slice(0, 7) || 'local'
+
 export default defineConfig({
   plugins: [react()],
+  define: { __EZO_RELEASE__: JSON.stringify(RELEASE) },
   build: {
     target: 'es2020',
     rollupOptions: {

@@ -1,21 +1,6 @@
 -- ეზო — სქემის ნაწილი 4/8. გაუშვი 3-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
 -- ---------------------------------------------------------------------
--- v2 RLS
--- ---------------------------------------------------------------------
-alter table public.push_subscriptions enable row level security;
-alter table public.app_secrets enable row level security;
-alter table public.game_private enable row level security;
-alter table public.game_hands enable row level security;
-
-drop policy if exists "push own" on public.push_subscriptions;
-create policy "push own" on public.push_subscriptions for all to authenticated
-  using (user_id = auth.uid()) with check (user_id = auth.uid());
-drop policy if exists "hands own" on public.game_hands;
-create policy "hands own" on public.game_hands for select to authenticated using (user_id = auth.uid());
--- app_secrets და game_private: პოლიტიკა არ არის — მხოლოდ სერვერი (service role)
-
--- ---------------------------------------------------------------------
 -- უსაფრთხოება: შიდა ფუნქციები კლიენტიდან არ გამოიძახება
 -- ---------------------------------------------------------------------
 revoke execute on function public.notify(uuid, uuid, text, uuid, uuid) from public, anon, authenticated;
@@ -371,3 +356,38 @@ begin
      where conversation_id = p_conv and user_id = (select user_id from conversation_members where conversation_id = p_conv order by last_read_at limit 1);
   end if;
 end $$;
+
+create or replace function public.rename_chat(p_conv uuid, p_title text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if public.chat_role(p_conv) is distinct from 'admin' then raise exception 'მხოლოდ ჩატის ადმინისთვის'; end if;
+  update conversations set title = left(btrim(p_title), 80) where id = p_conv and kind = 'group';
+  insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(), 'შეცვალა სახელი: „' || left(btrim(p_title), 80) || '“', '{"system": true}');
+end $$;
+
+create or replace function public.chat_members(p_conv uuid)
+returns table (id uuid, username text, full_name text, avatar_url text, last_seen timestamptz, role text)
+language sql stable security definer set search_path = public as $$
+  select p.id, p.username, p.full_name, p.avatar_url, p.last_seen, m.role
+  from conversation_members m join profiles p on p.id = m.user_id
+  where m.conversation_id = p_conv and public.is_member(p_conv)
+  order by m.role, p.full_name;
+$$;
+
+-- ---------------------------------------------------------------------
+-- ზარები (WebRTC). მოწვევა ბაზაშია — აბონენტის ვინაობა ყალბდება ვერ;
+-- SDP/ICE იცვლება Realtime არხზე „call:<id>“ (id შემთხვევითი UUID-ია და მხოლოდ ორმა იცის).
+-- ---------------------------------------------------------------------
+create table if not exists public.calls (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references public.conversations on delete cascade,
+  caller_id uuid not null references public.profiles on delete cascade,
+  callee_id uuid not null references public.profiles on delete cascade,
+  kind text not null check (kind in ('audio', 'video')),
+  status text not null default 'ringing' check (status in ('ringing', 'accepted', 'declined', 'missed', 'ended', 'busy')),
+  created_at timestamptz not null default now(),
+  answered_at timestamptz,
+  ended_at timestamptz,
+  check (caller_id <> callee_id)
+);
+create index if not exists calls_callee_idx on public.calls (callee_id, created_at desc);

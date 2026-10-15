@@ -6,7 +6,9 @@ import './styles/global.css'
 import './styles/games.css'
 import './styles/digital.css'
 import { registerServiceWorker } from './lib/push.js'
+import { installErrorReporter } from './lib/errors.js'
 
+installErrorReporter()
 registerServiceWorker()
 
 createRoot(document.getElementById('root')).render(

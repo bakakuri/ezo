@@ -451,3 +451,22 @@ end $$;
 drop trigger if exists messages_after_insert on public.messages;
 create trigger messages_after_insert after insert on public.messages
   for each row execute function public.on_message();
+
+create or replace function public.get_or_create_dm(p_other uuid)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid;
+begin
+  if auth.uid() is null or p_other = auth.uid() then raise exception 'invalid'; end if;
+  if public.is_blocked(auth.uid(), p_other) then raise exception 'blocked'; end if;
+  select c.id into v_id from conversations c
+    join conversation_members a on a.conversation_id = c.id and a.user_id = auth.uid()
+    join conversation_members b on b.conversation_id = c.id and b.user_id = p_other
+    where c.kind in ('dm', 'dating')
+    order by c.kind = 'dm' desc
+    limit 1;
+  if v_id is null then
+    insert into conversations (kind) values ('dm') returning id into v_id;
+    insert into conversation_members (conversation_id, user_id) values (v_id, auth.uid()), (v_id, p_other);
+  end if;
+  return v_id;
+end $$;

@@ -1,40 +1,5 @@
 -- ეზო — სქემის ნაწილი 5/8. გაუშვი 4-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.rename_chat(p_conv uuid, p_title text)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if public.chat_role(p_conv) is distinct from 'admin' then raise exception 'მხოლოდ ჩატის ადმინისთვის'; end if;
-  update conversations set title = left(btrim(p_title), 80) where id = p_conv and kind = 'group';
-  insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(), 'შეცვალა სახელი: „' || left(btrim(p_title), 80) || '“', '{"system": true}');
-end $$;
-
-create or replace function public.chat_members(p_conv uuid)
-returns table (id uuid, username text, full_name text, avatar_url text, last_seen timestamptz, role text)
-language sql stable security definer set search_path = public as $$
-  select p.id, p.username, p.full_name, p.avatar_url, p.last_seen, m.role
-  from conversation_members m join profiles p on p.id = m.user_id
-  where m.conversation_id = p_conv and public.is_member(p_conv)
-  order by m.role, p.full_name;
-$$;
-
--- ---------------------------------------------------------------------
--- ზარები (WebRTC). მოწვევა ბაზაშია — აბონენტის ვინაობა ყალბდება ვერ;
--- SDP/ICE იცვლება Realtime არხზე „call:<id>“ (id შემთხვევითი UUID-ია და მხოლოდ ორმა იცის).
--- ---------------------------------------------------------------------
-create table if not exists public.calls (
-  id uuid primary key default gen_random_uuid(),
-  conversation_id uuid not null references public.conversations on delete cascade,
-  caller_id uuid not null references public.profiles on delete cascade,
-  callee_id uuid not null references public.profiles on delete cascade,
-  kind text not null check (kind in ('audio', 'video')),
-  status text not null default 'ringing' check (status in ('ringing', 'accepted', 'declined', 'missed', 'ended', 'busy')),
-  created_at timestamptz not null default now(),
-  answered_at timestamptz,
-  ended_at timestamptz,
-  check (caller_id <> callee_id)
-);
-create index if not exists calls_callee_idx on public.calls (callee_id, created_at desc);
-
 create or replace function public.before_call_insert()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
@@ -400,3 +365,30 @@ begin
 end $$;
 revoke execute on function public.tournament_tick() from public, anon;
 grant execute on function public.tournament_tick() to authenticated, service_role;
+
+-- ტაიმერი: Supabase-ში ჯერ ჩართე Database → Extensions → pg_cron (თუ ეს ბლოკი ვერ ჩართავს)
+do $$
+begin
+  begin
+    create extension if not exists pg_cron;
+  exception when others then
+    raise notice 'pg_cron მიუწვდომელია — ჩართე Database → Extensions → pg_cron და ფაილი ხელახლა გაუშვი (%)', sqlerrm;
+    return;
+  end;
+  perform cron.schedule('ezo-tournaments', '* * * * *', 'select public.tournament_tick()');
+exception when others then
+  raise notice 'ტურნირების ტაიმერი ვერ ჩაირთო: %', sqlerrm;
+end $$;
+
+-- =====================================================================
+--  v6: სოციალური — დახურული პროფილი, გამოწერის თხოვნები, გამოკითხვები,
+--  შენახული პოსტები და კოლექციები, სთორის ჰაილაითები, „ახლო მეგობრები“
+-- =====================================================================
+create table if not exists public.follow_requests (
+  requester_id uuid references public.profiles on delete cascade,
+  target_id uuid references public.profiles on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (requester_id, target_id),
+  check (requester_id <> target_id)
+);
+create index if not exists follow_requests_target_idx on public.follow_requests (target_id, created_at desc);

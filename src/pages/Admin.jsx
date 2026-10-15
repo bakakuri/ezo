@@ -12,17 +12,21 @@ import { useToast } from '../components/Toast.jsx'
 export default function Admin() {
   const { me } = useAuth()
   const toast = useToast()
+  const [section, setSection] = useState('reports')
   const [tab, setTab] = useState('open')
   const [stats, setStats] = useState(null)
   const [list, setList] = useState(null)
   const [banFor, setBanFor] = useState(null)
+  const [errCount, setErrCount] = useState(0)
+  const reportsTab = section === 'reports'
 
   const load = useCallback(() => {
     setList(null)
-    if (tab !== 'words') api.adminReports(tab).then(setList).catch((e) => { toast(e.message, 'error'); setList([]) })
+    if (reportsTab) api.adminReports(tab).then(setList).catch((e) => { toast(e.message, 'error'); setList([]) })
     api.adminStats().then(setStats).catch(() => {})
-  }, [tab, toast])
+  }, [tab, reportsTab, toast])
   useEffect(() => { load() }, [load])
+  useEffect(() => { api.adminErrors(1).then((l) => setErrCount(l.length)).catch(() => {}) }, [])
 
   if (!['moderator', 'admin'].includes(me?.role)) {
     return <><TopBar title="მოდერაცია" backTo="/settings" /><Empty icon="block" title="წვდომა არ გაქვს" text="ეს გვერდი მხოლოდ მოდერატორებისთვისაა." /></>
@@ -44,21 +48,31 @@ export default function Admin() {
         <div className="stat-row">
           <div><b>{stats.open_reports}</b><span>ღია რეპორტი</span></div>
           <div><b>{stats.users}</b><span>მომხმარებელი</span></div>
-          <div><b>{stats.posts_24h}</b><span>პოსტი 24 სთ-ში</span></div>
+          <div><b>{stats.posts_24h}</b><span>პოსტი <span className="nowrap">24 სთ-ში</span></span></div>
           <div><b>{stats.new_users_7d}</b><span>ახალი 7 დღეში</span></div>
           <div><b>{stats.banned}</b><span>შეზღუდული</span></div>
           <div><b>{stats.active_games}</b><span>აქტიური თამაში</span></div>
         </div>
       )}
       <div className="seg" role="tablist">
-        {[['open', 'ღია'], ['resolved', 'დახურული'], ['dismissed', 'უარყოფილი'], ['words', 'სიტყვები']].map(([k, l]) => (
-          <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>
+        {[['reports', 'რეპორტები'], ['words', 'სიტყვები'], ['errors', 'შეცდომები']].map(([k, l]) => (
+          <button key={k} role="tab" aria-selected={section === k} className={section === k ? 'on' : ''} onClick={() => setSection(k)}>
+            {l}{k === 'errors' && errCount > 0 && <span className="tab-count" aria-label={`${errCount} ბოლო 24 საათში`}>{errCount}</span>}
+          </button>
         ))}
       </div>
-      {tab === 'words' && <BannedWords />}
-      {tab !== 'words' && list === null && <Loader />}
-      {tab !== 'words' && list?.length === 0 && <Empty icon="check" title={tab === 'open' ? 'ღია რეპორტები არ არის' : 'სია ცარიელია'} />}
-      {tab !== 'words' && list?.map((r) => {
+      {section === 'words' && <BannedWords />}
+      {section === 'errors' && <ErrorLog onCount={setErrCount} />}
+      {reportsTab && (
+        <div className="chips admin-filter" role="group" aria-label="რეპორტის სტატუსი">
+          {[['open', 'ღია'], ['resolved', 'დახურული'], ['dismissed', 'უარყოფილი']].map(([k, l]) => (
+            <button key={k} className={`chip${tab === k ? ' on' : ''}`} aria-pressed={tab === k} onClick={() => setTab(k)}>{l}</button>
+          ))}
+        </div>
+      )}
+      {reportsTab && list === null && <Loader />}
+      {reportsTab && list?.length === 0 && <Empty icon="check" title={tab === 'open' ? 'ღია რეპორტები არ არის' : 'სია ცარიელია'} />}
+      {reportsTab && list?.map((r) => {
         const t = r.target_user
         const post = r.target_post
         const listing = r.target_listing
@@ -155,6 +169,78 @@ function BannedWords() {
           </span>
         ))}
       </div>
+    </section>
+  )
+}
+
+// შეცდომების ჟურნალი: ერთნაირი შეცდომები ერთად, ბოლო ჩანაწერის დეტალებით
+const SOURCES = { boundary: 'ეკრანი ჩავარდა', window: 'სკრიპტი', promise: 'მოთხოვნა', api: 'API / სქემა', chunk: 'ძველი ვერსია' }
+const PERIODS = [[1, '24 საათი', '24 საათში'], [7, '7 დღე', '7 დღეში'], [30, '30 დღე', '30 დღეში']]
+
+function device(ua = '') {
+  if (!ua) return null
+  const os = /Android/.test(ua) ? 'Android' : /iPhone|iPad|iOS/.test(ua) ? 'iOS' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : null
+  const br = /SamsungBrowser/.test(ua) ? 'Samsung' : /Edg\//.test(ua) ? 'Edge' : /Firefox|FxiOS/.test(ua) ? 'Firefox' : /Chrome|CriOS/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : null
+  return [os, br].filter(Boolean).join(', ') || null
+}
+
+function ErrorLog({ onCount }) {
+  const toast = useToast()
+  const [days, setDays] = useState(7)
+  const [list, setList] = useState(null)
+  useEffect(() => {
+    let live = true
+    setList(null)
+    api.adminErrors(days).then((l) => {
+      if (!live) return
+      setList(l)
+      if (days === 1) onCount(l.length)
+    }).catch((e) => { if (live) { toast(e.message, 'error'); setList([]) } })
+    return () => { live = false }
+  }, [days, toast, onCount])
+
+  const clear = async (e) => {
+    try {
+      await api.adminClearErrors(e.message)
+      setList((l) => l.filter((x) => x.message !== e.message))
+      if (Date.now() - Date.parse(e.last_at) < 864e5) onCount((n) => Math.max(0, n - 1))
+      toast('შეცდომა მონიშნულია მოგვარებულად')
+    } catch (er) { toast(er.message, 'error') }
+  }
+
+  return (
+    <section className="error-log">
+      <div className="chips admin-filter" role="group" aria-label="პერიოდი">
+        {PERIODS.map(([d, l]) => <button key={d} className={`chip${days === d ? ' on' : ''}`} aria-pressed={days === d} onClick={() => setDays(d)}>{l}</button>)}
+      </div>
+      {list === null && <Loader />}
+      {list?.length === 0 && <Empty icon="check" title="შეცდომები არ არის" text={`ბოლო ${PERIODS.find(([d]) => d === days)[2]} აპს შეცდომა არ ჰქონია.`} />}
+      {list?.map((e) => (
+        <article key={e.message} className="err-card">
+          <div className="err-meta">
+            <span className="count">{e.events}-ჯერ</span>
+            <span className={`err-src ${e.source}`}>{SOURCES[e.source] || e.source}</span>
+            {e.users > 0 && <span className="faint">{e.users} ადამიანთან</span>}
+            <span className="faint grow-end">{timeAgo(e.last_at)}</span>
+          </div>
+          <code className="err-msg">{e.message}</code>
+          <dl className="err-facts">
+            {e.path && <><dt>გვერდი</dt><dd>{e.path}</dd></>}
+            {device(e.user_agent) && <><dt>მოწყობილობა</dt><dd>{device(e.user_agent)}</dd></>}
+            {e.release && <><dt>ვერსია</dt><dd>{e.release}</dd></>}
+            {e.events > 1 && <><dt>პირველად</dt><dd>{timeAgo(e.first_at)} წინ</dd></>}
+          </dl>
+          {e.stack && (
+            <details className="err-stack">
+              <summary>დეტალები</summary>
+              <pre>{e.stack}</pre>
+            </details>
+          )}
+          <div className="acts">
+            <button className="btn btn-outline sm" onClick={() => clear(e)}><Icon name="check" size={15} />მოგვარებულია</button>
+          </div>
+        </article>
+      ))}
     </section>
   )
 }

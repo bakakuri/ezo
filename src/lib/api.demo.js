@@ -350,6 +350,13 @@ const demoMfa = { enabled: false, verified: true }
 // მოწვევა მხოლოდ ერთხელ და მხოლოდ ახალ ანგარიშზე (როგორც claim_invite სერვერზე)
 const demoInvite = { fresh: false, by: null }
 const bannedWords = ['კაზინო']
+// შეცდომების ჟურნალის მაგალითები (ახალი ჩანაწერები ზემოთ)
+const clientErrors = [
+  ...[12, 40, 95].map((m, i) => ({ message: 'PGRST200: Could not find a relationship between \'posts\' and \'posts\' in the schema cache', stack: 'Searched for a foreign key relationship between \'posts\' and \'posts\' using the hint \'posts_quote_id_fkey\'',
+    path: '/', source: 'api', release: 'e55ab27', agent: 'Mozilla/5.0 (Linux; Android 14; 23090RA98G) Chrome/129.0 Mobile Safari/537.36', user_id: `u${i % 2}`, created_at: ago(m) })),
+  { message: 'Failed to fetch dynamically imported module: https://ezo-ten.vercel.app/assets/Inbox-Bx3k9.js', stack: null, path: '/inbox', source: 'chunk', release: '48b99a1',
+    agent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Safari/604.1', user_id: 'u2', created_at: ago(60 * 26) },
+]
 const pushOn = { value: false }
 const reports = [
   { id: 'rp1', reporter_id: 'u3', target_post: 'p7', target_user: null, category: 'spam', reason: 'რეკლამა', status: 'open', created_at: ago(30) },
@@ -1155,6 +1162,26 @@ export const api = {
     if (p) { p.banned_until = days ? new Date(Date.now() + days * 864e5).toISOString() : 'infinity'; p.ban_reason = note }
   },
   async adminUnban(userId) { const p = profiles.get(userId); if (p) { p.banned_until = null; p.ban_reason = null } },
+
+  async logError(e) { clientErrors.unshift({ ...e, user_id: ME, created_at: new Date().toISOString() }) },
+  async adminErrors(days = 7) {
+    await wait(120)
+    const since = Date.now() - days * 864e5
+    const groups = new Map()
+    for (const e of clientErrors) {
+      if (Date.parse(e.created_at) < since) continue
+      const g = groups.get(e.message)
+      if (g) { g.events++; g.ids.add(e.user_id); if (e.created_at < g.first_at) g.first_at = e.created_at; continue }
+      groups.set(e.message, { message: e.message, source: e.source, events: 1, ids: new Set([e.user_id]), first_at: e.created_at, last_at: e.created_at,
+        path: e.path, stack: e.stack, release: e.release, user_agent: e.agent })
+    }
+    return [...groups.values()].map(({ ids, ...g }) => ({ ...g, users: ids.size }))
+  },
+  async adminClearErrors(message) {
+    const n = clientErrors.length
+    for (let i = clientErrors.length - 1; i >= 0; i--) if (clientErrors[i].message === message) clientErrors.splice(i, 1)
+    return n - clientErrors.length
+  },
 }
 
 const seatList = (g) => SEAT_LETTERS.slice(0, g.seats || 2)

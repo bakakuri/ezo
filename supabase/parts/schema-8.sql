@@ -1,68 +1,5 @@
 -- ეზო — სქემის ნაწილი 8/8. გაუშვი 7-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- =====================================================================
---  v9: თამაშები 2.0 — ბურა, ლოტო, დღის ამოცანა, ყურება, რეაქციები და ჩატი თამაშისას
--- =====================================================================
--- ბურა ტურნირებშიც (ლოტო — მხოლოდ მაგიდა)
-alter table public.tournaments drop constraint if exists tournaments_type_check;
-alter table public.tournaments add constraint tournaments_type_check
-  check (type in ('nardi', 'longnardi', 'chess', 'checkers', 'domino', 'durak', 'bura'));
-create index if not exists games_live_idx on public.games (updated_at desc) where status = 'active' and is_public;
-
--- ---- დღის ჭადრაკის ამოცანა (ამონახსნი კლიენტს არ ეგზავნება — სვლებს სერვერი ამოწმებს)
-create table if not exists public.chess_puzzles (
-  id int primary key,
-  title text not null,
-  fen text not null,
-  solution text[] not null
-);
-insert into public.chess_puzzles (id, title, fen, solution) values
-  (1, 'უკანა რიგი', '6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1', array['d1d8']),
-  (2, 'სკოლის მატი', 'r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1', array['f3f7']),
-  (3, 'ფილიდორის მემკვიდრეობა', 'r6k/6pp/7N/8/8/1Q6/6PP/6K1 w - - 0 1', array['b3g8', 'a8g8', 'h6f7']),
-  (4, 'უსწრაფესი მატი', 'rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2', array['d8h4']),
-  (5, 'არაბული მატი', '7k/R7/5N2/8/8/8/8/6K1 w - - 0 1', array['a7h7']),
-  (6, 'ჩახრჩობილი მეფე', '6rk/6pp/8/6N1/8/8/8/6K1 w - - 0 1', array['g5f7']),
-  (7, 'შავების ჯერია: უკანა რიგი', '3r2k1/8/8/8/8/8/5PPP/6K1 b - - 0 1', array['d8d1']),
-  (8, 'ეპოლეტები', '3rkr2/8/8/8/2Q5/8/8/4K3 w - - 0 1', array['c4e6']),
-  (9, 'დერეფანი', '6k1/5ppp/8/8/8/8/8/K3Q3 w - - 0 1', array['e1e8']),
-  (10, 'ფილიდორი შავებით', '6k1/6pp/1q6/8/8/7n/6PP/R6K b - - 0 1', array['b6g1', 'a1g1', 'h3f2']),
-  (11, 'მეფე და ეტლი', 'k7/8/1K6/8/8/8/8/7R w - - 0 1', array['h1h8']),
-  (12, 'ცხენის ხაფანგი', '6k1/8/8/8/8/3n4/6PP/6RK b - - 0 1', array['d3f2']),
-  (13, 'ოპოზიცია', '4k3/8/4K3/8/8/8/8/R7 w - - 0 1', array['a1a8']),
-  (14, 'სკოლის მატი, მეორე ვარიანტი', 'r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1', array['f3f7'])
-on conflict (id) do update set title = excluded.title, fen = excluded.fen, solution = excluded.solution;
-
-create table if not exists public.puzzle_solves (
-  user_id uuid references public.profiles on delete cascade,
-  day date not null,
-  puzzle_id int not null references public.chess_puzzles,
-  solved boolean not null default false,
-  attempts int not null default 0,
-  solved_at timestamptz,
-  primary key (user_id, day)
-);
-
-create or replace function public.puzzle_of_day(p_day date)
-returns public.chess_puzzles language sql stable security definer set search_path = public as $$
-  select * from public.chess_puzzles
-   where id = (((p_day - date '2026-01-01') % (select count(*) from public.chess_puzzles)::int
-               + (select count(*) from public.chess_puzzles)::int) % (select count(*) from public.chess_puzzles)::int) + 1;
-$$;
-
-create or replace function public.daily_puzzle()
-returns jsonb language plpgsql stable security definer set search_path = public as $$
-declare v_day date := public.tbilisi_today(); p chess_puzzles; r puzzle_solves;
-begin
-  p := public.puzzle_of_day(v_day);
-  select * into r from puzzle_solves where user_id = auth.uid() and day = v_day;
-  return jsonb_build_object('day', v_day, 'id', p.id, 'title', p.title, 'fen', p.fen,
-    'moves', ceil(array_length(p.solution, 1) / 2.0)::int,
-    'solved', coalesce(r.solved, false), 'attempts', coalesce(r.attempts, 0),
-    'solution', case when r.solved then to_jsonb(p.solution) end,
-    'solvers', (select count(*) from puzzle_solves where day = v_day and solved));
-end $$;
-
 -- p_moves: მთელი თანმიმდევრობა ამ მომენტამდე (ჩემი სვლები და პასუხები), ბოლო — ჩემი ახალი სვლა
 create or replace function public.puzzle_move(p_moves text[])
 returns jsonb language plpgsql security definer set search_path = public as $$
@@ -355,3 +292,78 @@ end $$;
 
 revoke execute on function public.rate_count(text, timestamptz) from public, anon;
 revoke execute on function public.has_banned(text) from public, anon;
+
+-- ---------------------------------------------------------------------
+-- შეცდომების ჟურნალი: აპის შეცდომები ბრაუზერიდან (ადმინ პანელი → „შეცდომები“). 30 დღეზე ძველი თავისით იშლება.
+-- ---------------------------------------------------------------------
+create table if not exists public.client_errors (
+  id bigint generated always as identity primary key,
+  user_id uuid references auth.users on delete set null,
+  message text not null,
+  stack text,
+  path text,
+  source text not null default 'window',
+  release text,
+  user_agent text,
+  created_at timestamptz not null default now()
+);
+create index if not exists client_errors_time_idx on public.client_errors (created_at desc);
+create index if not exists client_errors_user_idx on public.client_errors (user_id, created_at desc);
+create index if not exists client_errors_msg_idx on public.client_errors (message, created_at desc);
+-- ცხრილზე პირდაპირი წვდომა არავის აქვს: ჩაწერა log_client_error-ით, წაკითხვა admin_errors-ით
+alter table public.client_errors enable row level security;
+revoke all on public.client_errors from anon, authenticated;
+
+-- p_source: 'boundary' (ეკრანი ჩავარდა) | 'window' | 'promise' | 'api' (სქემის/API-ს შეუსაბამობა) | 'chunk' (ძველი ვერსიის ფაილები)
+create or replace function public.log_client_error(p_message text, p_stack text default null, p_path text default null,
+  p_source text default 'window', p_release text default null, p_agent text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare u uuid := auth.uid(); v_msg text;
+begin
+  v_msg := left(btrim(regexp_replace(coalesce(p_message, ''), '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<id>', 'gi')), 500);
+  if v_msg = '' then return; end if;
+  -- ზღვარი: ერთ ადამიანზე 30 ჩანაწერი საათში, შეუსვლელებზე ჯამში 300
+  if u is not null then
+    if (select count(*) from client_errors where user_id = u and created_at > now() - interval '1 hour') >= 30 then return; end if;
+  elsif (select count(*) from client_errors where user_id is null and created_at > now() - interval '1 hour') >= 300 then
+    return;
+  end if;
+  insert into client_errors (user_id, message, stack, path, source, release, user_agent)
+  values (u, v_msg, left(p_stack, 4000), left(p_path, 300),
+          case when p_source in ('boundary', 'window', 'promise', 'api', 'chunk') then p_source else 'window' end,
+          left(p_release, 40), left(p_agent, 300));
+  if random() < 0.02 then delete from client_errors where created_at < now() - interval '30 days'; end if;
+end $$;
+
+-- ერთნაირი შეცდომები ერთად: რამდენჯერ, რამდენ ადამიანთან, ბოლო მისამართი და დეტალები
+create or replace function public.admin_errors(p_days int default 7)
+returns table (message text, source text, events bigint, users bigint, first_at timestamptz, last_at timestamptz,
+               path text, stack text, release text, user_agent text)
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  return query
+  select e.message,
+    (array_agg(e.source order by e.created_at desc))[1],
+    count(*), count(distinct e.user_id), min(e.created_at), max(e.created_at),
+    (array_agg(e.path order by e.created_at desc))[1],
+    (array_agg(e.stack order by e.created_at desc) filter (where e.stack is not null))[1],
+    (array_agg(e.release order by e.created_at desc))[1],
+    (array_agg(e.user_agent order by e.created_at desc))[1]
+  from client_errors e
+  where e.created_at > now() - make_interval(days => greatest(1, least(coalesce(p_days, 7), 30)))
+  group by e.message
+  order by max(e.created_at) desc
+  limit 100;
+end $$;
+
+-- „მოგვარებულია“: ამ შეცდომის ყველა ჩანაწერი იშლება
+create or replace function public.admin_clear_errors(p_message text)
+returns int language plpgsql security definer set search_path = public as $$
+declare n int;
+begin
+  if not public.is_staff() then raise exception 'forbidden'; end if;
+  delete from client_errors where message = p_message;
+  get diagnostics n = row_count;
+  return n;
+end $$;

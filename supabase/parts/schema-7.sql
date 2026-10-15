@@ -1,61 +1,5 @@
 -- ეზო — სქემის ნაწილი 7/8. გაუშვი 6-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ---- RLS
-alter table public.listings enable row level security;
-alter table public.listing_saves enable row level security;
-alter table public.listing_views enable row level security;
-
-drop policy if exists "listings read" on public.listings;
-drop policy if exists "listings create" on public.listings;
-drop policy if exists "listings update own" on public.listings;
-drop policy if exists "listings delete" on public.listings;
--- დამალული და დაბლოკილი გამყიდველის განცხადებებს მხოლოდ თვითონ და მოდერატორი ხედავს
-create policy "listings read" on public.listings for select to authenticated using (
-  seller_id = auth.uid() or public.is_staff()
-  or (not hidden and not public.is_blocked(auth.uid(), seller_id)
-      and not exists (select 1 from public.profiles p where p.id = seller_id and p.banned_until > now())));
-create policy "listings create" on public.listings for insert to authenticated
-  with check (seller_id = auth.uid() and public.can_act());
-create policy "listings update own" on public.listings for update to authenticated
-  using (seller_id = auth.uid()) with check (seller_id = auth.uid() and public.can_act());
-create policy "listings delete" on public.listings for delete to authenticated
-  using (seller_id = auth.uid() or public.is_staff());
-
-drop policy if exists "listing saves own" on public.listing_saves;
-create policy "listing saves own" on public.listing_saves for all to authenticated
-  using (user_id = auth.uid())
-  with check (user_id = auth.uid() and exists (select 1 from public.listings l where l.id = listing_id and l.seller_id <> auth.uid()));
--- listing_views: პოლიტიკა არ აქვს — მხოლოდ view_listing()-ით
-
-revoke execute on function public.listings_guard() from public, anon, authenticated;
-revoke execute on function public.on_listing_change() from public, anon, authenticated;
-revoke execute on function public.on_listing_save() from public, anon, authenticated;
-
--- =====================================================================
---  v8: ქულები და მიღწევები — XP, დონეები, დღიური სერია, „ბროწეული“ (შიდა ვალუტა, ფულით არ იყიდება), ბეჯები
--- =====================================================================
-create table if not exists public.progress (
-  user_id uuid primary key references public.profiles on delete cascade,
-  xp int not null default 0 check (xp >= 0),
-  coins int not null default 0 check (coins >= 0),
-  streak int not null default 0,
-  best_streak int not null default 0,
-  last_day date,
-  updated_at timestamptz not null default now()
-);
-
-create table if not exists public.progress_events (
-  id bigint generated always as identity primary key,
-  user_id uuid not null references public.profiles on delete cascade,
-  kind text not null,
-  xp int not null default 0,
-  coins int not null default 0,
-  ref text,
-  created_at timestamptz not null default now()
-);
-create index if not exists progress_events_user_idx on public.progress_events (user_id, kind, created_at desc);
-create index if not exists progress_events_week_idx on public.progress_events (created_at, user_id) where xp > 0;
-
 -- ბეჯების კატალოგი (სათაურები Push-ისთვის; აღწერა და იკონი — კლიენტში, src/lib/rewards.js)
 create table if not exists public.badges (
   key text primary key,
@@ -388,3 +332,66 @@ revoke execute on function public.progress_on_stats() from public, anon, authent
 revoke execute on function public.progress_on_sale() from public, anon, authenticated;
 revoke execute on function public.progress_on_gift() from public, anon, authenticated;
 revoke execute on function public.before_gift() from public, anon, authenticated;
+
+-- =====================================================================
+--  v9: თამაშები 2.0 — ბურა, ლოტო, დღის ამოცანა, ყურება, რეაქციები და ჩატი თამაშისას
+-- =====================================================================
+-- ბურა ტურნირებშიც (ლოტო — მხოლოდ მაგიდა)
+alter table public.tournaments drop constraint if exists tournaments_type_check;
+alter table public.tournaments add constraint tournaments_type_check
+  check (type in ('nardi', 'longnardi', 'chess', 'checkers', 'domino', 'durak', 'bura'));
+create index if not exists games_live_idx on public.games (updated_at desc) where status = 'active' and is_public;
+
+-- ---- დღის ჭადრაკის ამოცანა (ამონახსნი კლიენტს არ ეგზავნება — სვლებს სერვერი ამოწმებს)
+create table if not exists public.chess_puzzles (
+  id int primary key,
+  title text not null,
+  fen text not null,
+  solution text[] not null
+);
+insert into public.chess_puzzles (id, title, fen, solution) values
+  (1, 'უკანა რიგი', '6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1', array['d1d8']),
+  (2, 'სკოლის მატი', 'r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1', array['f3f7']),
+  (3, 'ფილიდორის მემკვიდრეობა', 'r6k/6pp/7N/8/8/1Q6/6PP/6K1 w - - 0 1', array['b3g8', 'a8g8', 'h6f7']),
+  (4, 'უსწრაფესი მატი', 'rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2', array['d8h4']),
+  (5, 'არაბული მატი', '7k/R7/5N2/8/8/8/8/6K1 w - - 0 1', array['a7h7']),
+  (6, 'ჩახრჩობილი მეფე', '6rk/6pp/8/6N1/8/8/8/6K1 w - - 0 1', array['g5f7']),
+  (7, 'შავების ჯერია: უკანა რიგი', '3r2k1/8/8/8/8/8/5PPP/6K1 b - - 0 1', array['d8d1']),
+  (8, 'ეპოლეტები', '3rkr2/8/8/8/2Q5/8/8/4K3 w - - 0 1', array['c4e6']),
+  (9, 'დერეფანი', '6k1/5ppp/8/8/8/8/8/K3Q3 w - - 0 1', array['e1e8']),
+  (10, 'ფილიდორი შავებით', '6k1/6pp/1q6/8/8/7n/6PP/R6K b - - 0 1', array['b6g1', 'a1g1', 'h3f2']),
+  (11, 'მეფე და ეტლი', 'k7/8/1K6/8/8/8/8/7R w - - 0 1', array['h1h8']),
+  (12, 'ცხენის ხაფანგი', '6k1/8/8/8/8/3n4/6PP/6RK b - - 0 1', array['d3f2']),
+  (13, 'ოპოზიცია', '4k3/8/4K3/8/8/8/8/R7 w - - 0 1', array['a1a8']),
+  (14, 'სკოლის მატი, მეორე ვარიანტი', 'r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1', array['f3f7'])
+on conflict (id) do update set title = excluded.title, fen = excluded.fen, solution = excluded.solution;
+
+create table if not exists public.puzzle_solves (
+  user_id uuid references public.profiles on delete cascade,
+  day date not null,
+  puzzle_id int not null references public.chess_puzzles,
+  solved boolean not null default false,
+  attempts int not null default 0,
+  solved_at timestamptz,
+  primary key (user_id, day)
+);
+
+create or replace function public.puzzle_of_day(p_day date)
+returns public.chess_puzzles language sql stable security definer set search_path = public as $$
+  select * from public.chess_puzzles
+   where id = (((p_day - date '2026-01-01') % (select count(*) from public.chess_puzzles)::int
+               + (select count(*) from public.chess_puzzles)::int) % (select count(*) from public.chess_puzzles)::int) + 1;
+$$;
+
+create or replace function public.daily_puzzle()
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare v_day date := public.tbilisi_today(); p chess_puzzles; r puzzle_solves;
+begin
+  p := public.puzzle_of_day(v_day);
+  select * into r from puzzle_solves where user_id = auth.uid() and day = v_day;
+  return jsonb_build_object('day', v_day, 'id', p.id, 'title', p.title, 'fen', p.fen,
+    'moves', ceil(array_length(p.solution, 1) / 2.0)::int,
+    'solved', coalesce(r.solved, false), 'attempts', coalesce(r.attempts, 0),
+    'solution', case when r.solved then to_jsonb(p.solution) end,
+    'solvers', (select count(*) from puzzle_solves where day = v_day and solved));
+end $$;
