@@ -9,6 +9,8 @@ import { Link } from '../lib/router.jsx'
 import { useAuth } from '../lib/auth.jsx'
 import { ShareSheet } from '../components/Share.jsx'
 import { TwoFactorSheet, DeleteAccountSheet, downloadMyData } from '../components/Security.jsx'
+import { InstallRow } from '../components/Install.jsx'
+import { saverSetting, setSaver, slowNetwork } from '../lib/net.js'
 
 export function applyTheme(t) {
   const root = document.documentElement
@@ -27,6 +29,8 @@ export default function Settings() {
   }
   const [theme, setTheme] = useState(readTheme)
   const pick = (t) => { setTheme(t); applyTheme(t) }
+  const [saver, setSaverState] = useState(saverSetting)
+  const pickSaver = (v) => { setSaverState(v); setSaver(v) }
   const toast = useToast()
   const toastP = toast
   const [push, setPush] = useState(null)
@@ -56,6 +60,17 @@ export default function Settings() {
       <div className="chips">
         {[['system', 'როგორც ტელეფონზე', 'phone'], ['light', 'ნათელი', 'sun'], ['dark', 'მუქი', 'moon']].map(([k, l, ic]) => (
           <button key={k} className={`chip${theme === k ? ' on' : ''}`} onClick={() => pick(k)}><Icon name={ic} size={16} />{l}</button>
+        ))}
+      </div>
+      <div className="section-title"><h2>აპი და ინტერნეტი</h2></div>
+      <InstallRow />
+      <div className="setting-row saver-row">
+        <Icon name="signal" />
+        <div className="grow">ტრაფიკის დაზოგვა<small>{saver === 'auto' ? (slowNetwork() ? 'ახლა ჩართულია: ინტერნეტი ნელია ან ტელეფონი ზოგავს მონაცემებს' : 'ჩაირთვება თავისით, როცა ინტერნეტი ნელია') : saver === 'on' ? 'ფიდში პატარა ფოტოები, ვიდეო თავისით არ ირთვება' : 'ფოტოები და ვიდეოები სრული ხარისხით'}</small></div>
+      </div>
+      <div className="chips saver-chips" role="radiogroup" aria-label="ტრაფიკის დაზოგვა">
+        {[['auto', 'ავტომატურად'], ['on', 'ჩართული'], ['off', 'გამორთული']].map(([k, l]) => (
+          <button key={k} role="radio" aria-checked={saver === k} className={`chip${saver === k ? ' on' : ''}`} onClick={() => pickSaver(k)}>{l}</button>
         ))}
       </div>
       <div className="section-title"><h2>შეტყობინებები</h2></div>

@@ -1,27 +1,5 @@
 -- ეზო — სქემის ნაწილი 3/8. გაუშვი 2-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ---------------------------------------------------------------------
--- მოდერაცია. ადმინის დანიშვნა (ერთხელ, SQL Editor-ში):
---   update public.profiles set role = 'admin' where username = 'შენი_username';
--- ---------------------------------------------------------------------
--- 5 სხვადასხვა ადამიანის რეპორტის შემდეგ პოსტი ავტომატურად იმალება
-create or replace function public.on_report()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if new.target_post is not null and
-     (select count(distinct reporter_id) from reports where target_post = new.target_post and status = 'open') >= 5 then
-    update posts set hidden = true where id = new.target_post;
-  end if;
-  if new.target_listing is not null and
-     (select count(distinct reporter_id) from reports where target_listing = new.target_listing and status = 'open') >= 5 then
-    update listings set hidden = true where id = new.target_listing;
-  end if;
-  return new;
-end $$;
-drop trigger if exists reports_after_insert on public.reports;
-create trigger reports_after_insert after insert on public.reports
-  for each row execute function public.on_report();
-
 -- ერთი სამიზნე = ერთი რიგი: პოსტი, განცხადება ან პროფილი
 create or replace function public.report_key(p_post uuid, p_listing uuid, p_user uuid)
 returns text language sql immutable as $$
@@ -496,3 +474,38 @@ end $$;
 drop trigger if exists reactions_before on public.message_reactions;
 create trigger reactions_before before insert or update on public.message_reactions
   for each row execute function public.before_reaction();
+
+create or replace function public.create_group_chat(p_title text, p_members uuid[])
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid; v_user uuid; v_title text := btrim(coalesce(p_title, ''));
+begin
+  if not public.can_act() then raise exception 'ანგარიში შეზღუდულია'; end if;
+  if char_length(v_title) < 1 or char_length(v_title) > 80 then raise exception 'ჩატის სახელი 1–80 სიმბოლო'; end if;
+  if coalesce(array_length(p_members, 1), 0) < 1 or array_length(p_members, 1) > 50 then raise exception 'აირჩიე 1–50 მონაწილე'; end if;
+  insert into conversations (kind, title, created_by) values ('group', v_title, auth.uid()) returning id into v_id;
+  insert into conversation_members (conversation_id, user_id, role) values (v_id, auth.uid(), 'admin');
+  foreach v_user in array p_members loop
+    if v_user <> auth.uid() and not public.is_blocked(auth.uid(), v_user) and exists (select 1 from profiles where id = v_user) then
+      insert into conversation_members (conversation_id, user_id) values (v_id, v_user) on conflict do nothing;
+    end if;
+  end loop;
+  insert into messages (conversation_id, sender_id, body, meta)
+  values (v_id, auth.uid(), 'შექმნა ჩატი „' || v_title || '“', '{"system": true}');
+  return v_id;
+end $$;
+
+create or replace function public.add_chat_members(p_conv uuid, p_members uuid[])
+returns void language plpgsql security definer set search_path = public as $$
+declare v_user uuid; v_names text;
+begin
+  if public.chat_role(p_conv) is distinct from 'admin' or (select kind from conversations where id = p_conv) <> 'group' then
+    raise exception 'მხოლოდ ჩატის ადმინისთვის';
+  end if;
+  foreach v_user in array p_members loop
+    if not public.is_blocked(auth.uid(), v_user) and exists (select 1 from profiles where id = v_user) then
+      insert into conversation_members (conversation_id, user_id) values (p_conv, v_user) on conflict do nothing;
+    end if;
+  end loop;
+  select string_agg(coalesce(nullif(split_part(full_name, ' ', 1), ''), username), ', ') into v_names from profiles where id = any(p_members);
+  insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(), 'დაამატა: ' || coalesce(v_names, ''), '{"system": true}');
+end $$;

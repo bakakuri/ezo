@@ -17,7 +17,8 @@ export class IllegalMove extends Error {
 
 const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i])
 
-export const HIDDEN = new Set(['domino', 'durak', 'joker', 'bura'])
+import { HIDDEN, withMyHand } from './hidden.js'
+export { HIDDEN, withMyHand }
 
 export function initFor(type, rand = cryptoRand, opts = {}) {
   if (type === 'domino') return domino.initState(rand)
@@ -145,12 +146,6 @@ export function handsOf(type, state) {
   if (!HIDDEN.has(type)) return null
   if (type === 'joker') return Object.fromEntries(joker.SEATS.map((seat) => [seat, joker.visibleHand(state, seat)]))
   return state.hands
-}
-
-// კლიენტზე: საჯარო მდგომარეობას ჩემს ხელს ვუმატებთ
-export function withMyHand(type, state, seat, tiles) {
-  if (!HIDDEN.has(type) || !seat || !tiles) return state
-  return { ...state, hands: { ...state.hands, [seat]: tiles } }
 }
 
 export const seatToMove = (type, state) => GAMES[type].seatOf(state)

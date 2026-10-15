@@ -10,6 +10,7 @@ import { useComposer } from './Composer.jsx'
 import { ReportSheet } from './Report.jsx'
 import { PollView, SaveSheet } from './PostExtras.jsx'
 import { hostOf, shortUrl } from '../lib/links.js'
+import { useSaver } from '../lib/net.js'
 
 // #თეგები, @მოხსენიებები და ბმულები
 const TOKEN_RE = /(https?:\/\/[^\s<>"'«»“”]+[^\s<>"'«»“”.,;:!?)\]]|[#@][\p{L}\p{N}_.]+)/gu
@@ -25,6 +26,7 @@ export function RichText({ text }) {
 }
 
 export function Media({ media }) {
+  const saver = useSaver()
   if (!media?.length) return null
   const single = media.length === 1
   return (
@@ -32,8 +34,8 @@ export function Media({ media }) {
       {media.map((m, i) => (
         <div className="m" key={i} style={single && m.w && m.h ? { aspectRatio: `${Math.max(m.w / m.h, 0.66)}` } : undefined}>
           {m.type === 'video'
-            ? <video src={m.url} controls playsInline preload="metadata" muted />
-            : <img src={m.url} alt="" loading="lazy" decoding="async" />}
+            ? <video src={m.url} controls playsInline preload={saver ? 'none' : 'metadata'} muted />
+            : <img src={saver && m.thumb ? m.thumb : m.url} alt="" loading="lazy" decoding="async" />}
         </div>
       ))}
     </div>
@@ -42,10 +44,11 @@ export function Media({ media }) {
 
 // ბმულის ბარათი: დომენი ყოველთვის ნამდვილი ბმულიდან ჩანს (არა ავტორის ტექსტიდან)
 export function LinkCard({ link, onRemove }) {
+  const saver = useSaver()
   if (!link?.url) return null
   const body = (
     <>
-      {link.image && <img src={link.image} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />}
+      {link.image && !(saver && !onRemove) && <img src={link.image} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />}
       <span className="link-text">
         <small>{hostOf(link.url)}</small>
         <b>{link.title}</b>

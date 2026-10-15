@@ -14,6 +14,8 @@ import Onboarding from './pages/Onboarding.jsx'
 import NewPassword from './pages/NewPassword.jsx'
 import MfaPrompt from './pages/MfaPrompt.jsx'
 import { InviteClaimer, OfflineBar } from './components/Growth.jsx'
+import { InstallBanner } from './components/Install.jsx'
+import { prefetchWhenIdle } from './lib/net.js'
 import Home from './pages/Home.jsx'
 import { ErrorBoundary } from './components/ErrorBoundary.jsx'
 
@@ -142,6 +144,7 @@ function Routes() {
         </ErrorBoundary>
       </main>
       {!opts.full && !opts.noAside && <Aside />}
+      {!opts.noNav && !opts.full && <InstallBanner />}
       {!opts.noNav && <BottomNav dark={opts.dark} />}
     </div>
   )
@@ -165,6 +168,15 @@ function Gate() {
   if (mfa) return <MfaPrompt />
   if (!me) return <Loader />
   if (!me.onboarded) return <Onboarding />
+  return <SignedIn />
+}
+
+// შესული მომხმარებელი: ხშირი გვერდების კოდი ფონზე ჩამოიტვირთება (კარგ ინტერნეტზე), რომ გადასვლა მყისიერი იყოს
+function SignedIn() {
+  useEffect(() => prefetchWhenIdle([
+    () => import('./pages/Notifications.jsx'), ChatMod, ProfileMod, () => import('./pages/Explore.jsx'),
+    () => import('./pages/Games.jsx'), () => import('./pages/Reels.jsx'), () => import('./pages/PostPage.jsx'),
+  ]), [])
   return (
     <UnreadProvider>
       <RewardsProvider>

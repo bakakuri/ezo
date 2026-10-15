@@ -554,3 +554,14 @@ end $$;
 drop trigger if exists swipes_after on public.swipes;
 create trigger swipes_after after insert on public.swipes
   for each row execute function public.on_swipe();
+
+create or replace function public.age_of(d date)
+returns int language sql immutable as $$ select extract(year from age(d))::int $$;
+
+create or replace function public.dating_card(dp public.dating_profiles, p public.profiles)
+returns jsonb language sql stable as $$
+  select jsonb_build_object(
+    'id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url,
+    'age', public.age_of(dp.birth_date), 'gender', dp.gender, 'bio', dp.bio, 'photos', dp.photos,
+    'interests', dp.interests, 'city', dp.city, 'last_seen', p.last_seen);
+$$;

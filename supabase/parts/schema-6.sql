@@ -1,78 +1,5 @@
 -- ეზო — სქემის ნაწილი 6/8. გაუშვი 5-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ქულის დარიცხვა: p_ref — ერთხელ თითო სამიზნეზე, p_cap — დღიური ლიმიტი ამ ტიპზე (თბილისის დროით)
-create or replace function public.award(p_user uuid, p_kind text, p_xp int, p_coins int, p_ref text default null, p_cap int default null)
-returns boolean language plpgsql security definer set search_path = public as $$
-declare v_old int; v_new int; v_lvl int;
-begin
-  if p_user is null then return false; end if;
-  if p_ref is not null and exists (select 1 from progress_events where user_id = p_user and kind = p_kind and ref = p_ref) then return false; end if;
-  if p_cap is not null and (select count(*) from progress_events where user_id = p_user and kind = p_kind
-                              and created_at >= public.tbilisi_day_start()) >= p_cap then return false; end if;
-  insert into progress (user_id) values (p_user) on conflict do nothing;
-  update progress set xp = xp + p_xp, coins = coins + p_coins, updated_at = now()
-   where user_id = p_user returning xp - p_xp, xp into v_old, v_new;
-  insert into progress_events (user_id, kind, xp, coins, ref) values (p_user, p_kind, p_xp, p_coins, p_ref);
-  v_lvl := public.level_of(v_new);
-  if v_lvl > public.level_of(v_old) then
-    perform public.award(p_user, 'level', 0, v_lvl * 5, v_lvl::text);
-    insert into notifications (user_id, type, data) values (p_user, 'level_up', jsonb_build_object('level', v_lvl, 'coins', v_lvl * 5));
-    perform public.check_badges(p_user, 'level');
-  end if;
-  return true;
-end $$;
-
-create or replace function public.spend_coins(p_user uuid, p_amount int, p_kind text, p_ref text default null)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if p_amount <= 0 then return; end if;
-  update progress set coins = coins - p_amount, updated_at = now() where user_id = p_user and coins >= p_amount;
-  if not found then raise exception 'ბროწეული არ გყოფნის'; end if;
-  insert into progress_events (user_id, kind, xp, coins, ref) values (p_user, p_kind, 0, -p_amount, p_ref);
-end $$;
-
-create or replace function public.check_badges(p_user uuid, p_metric text default null)
-returns void language plpgsql security definer set search_path = public as $$
-declare m jsonb; b record;
-begin
-  if p_user is null then return; end if;
-  m := public.badge_metrics(p_user, p_metric);
-  for b in select * from badges x
-            where (p_metric is null or x.metric = p_metric)
-              and coalesce((m ->> x.metric)::int, 0) >= x.target
-              and not exists (select 1 from user_badges u where u.user_id = p_user and u.badge = x.key)
-            order by x.sort loop
-    insert into user_badges (user_id, badge) values (p_user, b.key) on conflict do nothing;
-    if found then
-      perform public.award(p_user, 'badge', 0, b.coins, b.key);
-      insert into notifications (user_id, type, data) values (p_user, 'achievement', jsonb_build_object('badge', b.key, 'coins', b.coins));
-    end if;
-  end loop;
-end $$;
-
--- დღიური შესვლა: სერია, ბროწეული (5 → 15, ყოველ მე-7 დღეს +25), პირველად — მისასალმებელი 25
-create or replace function public.daily_checkin()
-returns jsonb language plpgsql security definer set search_path = public as $$
-declare v progress; v_today date := public.tbilisi_today(); v_streak int; v_reward int; v_first boolean;
-begin
-  if auth.uid() is null then raise exception 'not signed in'; end if;
-  insert into progress (user_id) values (auth.uid()) on conflict do nothing;
-  select * into v from progress where user_id = auth.uid() for update;
-  if v.last_day = v_today or not public.can_act() then
-    return jsonb_build_object('claimed', false, 'streak', v.streak, 'coins', v.coins, 'xp', v.xp, 'level', public.level_of(v.xp));
-  end if;
-  v_first := v.last_day is null;
-  v_streak := case when v.last_day = v_today - 1 then v.streak + 1 else 1 end;
-  v_reward := 5 + 2 * least(v_streak - 1, 5) + case when v_streak % 7 = 0 then 25 else 0 end;
-  update progress set streak = v_streak, best_streak = greatest(best_streak, v_streak), last_day = v_today where user_id = auth.uid();
-  perform public.award(auth.uid(), 'checkin', 10, v_reward, v_today::text);
-  if v_first then perform public.award(auth.uid(), 'welcome', 0, 25, 'welcome'); end if;
-  perform public.check_badges(auth.uid(), case when v_first then null else 'streak' end);
-  select * into v from progress where user_id = auth.uid();
-  return jsonb_build_object('claimed', true, 'first', v_first, 'streak', v_streak, 'reward', v_reward + case when v_first then 25 else 0 end,
-                            'coins', v.coins, 'xp', v.xp, 'level', public.level_of(v.xp));
-end $$;
-
 create or replace function public.my_progress()
 returns jsonb language plpgsql stable security definer set search_path = public as $$
 declare v progress;
@@ -457,3 +384,71 @@ begin
   return r;
 end $$;
 grant execute on function public.og_preview(text, text) to anon, authenticated;
+
+-- ---- მოწვევა: ახალი მომხმარებელი (7 დღემდე) ერთხელ იღებს; ორივე ერთმანეთს იწერს, ორივე იღებს ბროწეულს
+create or replace function public.claim_invite(p_username text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare v_inv profiles; v_me profiles;
+begin
+  select * into v_me from profiles where id = auth.uid();
+  if v_me.id is null then raise exception 'not signed in'; end if;
+  select * into v_inv from profiles where username = lower(btrim(p_username));
+  if v_inv.id is null or v_inv.id = v_me.id or not v_inv.onboarded then return jsonb_build_object('ok', false, 'reason', 'unknown'); end if;
+  if v_me.invited_by is not null or v_me.created_at < now() - interval '7 days' then return jsonb_build_object('ok', false, 'reason', 'old'); end if;
+  if public.is_blocked(v_me.id, v_inv.id) then return jsonb_build_object('ok', false, 'reason', 'blocked'); end if;
+  update profiles set invited_by = v_inv.id where id = v_me.id;
+  perform public.follow_user(v_inv.id);
+  insert into follows (follower_id, following_id) values (v_inv.id, v_me.id) on conflict do nothing;
+  perform public.award(v_inv.id, 'invite', 10, 20, v_me.id::text);
+  perform public.award(v_me.id, 'invited', 0, 10, 'invited');
+  insert into notifications (user_id, actor_id, type) values (v_inv.id, v_me.id, 'invite_joined');
+  return jsonb_build_object('ok', true, 'inviter', v_inv.username);
+end $$;
+
+create or replace function public.invite_stats()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select jsonb_build_object('count', (select count(*) from profiles where invited_by = auth.uid()),
+    'recent', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'username', username, 'full_name', full_name, 'avatar_url', avatar_url) order by created_at desc)
+                          from (select * from profiles where invited_by = auth.uid() order by created_at desc limit 12) x), '[]'::jsonb));
+$$;
+
+-- ---- სპამის ლიმიტები (პირდაპირი ჩანაწერებისთვის; სერვერული ფუნქციები თავისით ამოწმებს)
+-- მხოლოდ საკუთარი ჩანაწერები ითვლება (auth.uid())
+drop function if exists public.rate_count(text, uuid, timestamptz);
+create or replace function public.rate_count(p_table text, p_since timestamptz)
+returns int language plpgsql stable security definer set search_path = public as $$
+declare u uuid := auth.uid();
+begin
+  return case p_table
+    when 'posts' then (select count(*) from posts where author_id = u and created_at > p_since)
+    when 'messages' then (select count(*) from messages where sender_id = u and created_at > p_since)
+    when 'reports' then (select count(*) from reports where reporter_id = u and created_at > p_since)
+    when 'stories' then (select count(*) from stories where author_id = u and created_at > p_since)
+    else 0 end;
+end $$;
+
+create or replace function public.rate_guard()
+returns trigger language plpgsql security invoker set search_path = public as $$
+declare v_max int; v_win interval;
+begin
+  if current_user not in ('authenticated', 'anon') or public.is_staff() then return new; end if;
+  case tg_table_name
+    when 'posts' then v_max := 20; v_win := interval '10 minutes';
+    when 'messages' then v_max := 40; v_win := interval '1 minute';
+    when 'reports' then v_max := 20; v_win := interval '1 day';
+    when 'stories' then v_max := 30; v_win := interval '1 day';
+    else return new;
+  end case;
+  if public.rate_count(tg_table_name, now() - v_win) >= v_max then
+    raise exception 'ძალიან ხშირად — სცადე ცოტა ხანში';
+  end if;
+  return new;
+end $$;
+drop trigger if exists rate_guard on public.posts;
+create trigger rate_guard before insert on public.posts for each row execute function public.rate_guard();
+drop trigger if exists rate_guard on public.messages;
+create trigger rate_guard before insert on public.messages for each row execute function public.rate_guard();
+drop trigger if exists rate_guard on public.reports;
+create trigger rate_guard before insert on public.reports for each row execute function public.rate_guard();
+drop trigger if exists rate_guard on public.stories;
+create trigger rate_guard before insert on public.stories for each row execute function public.rate_guard();

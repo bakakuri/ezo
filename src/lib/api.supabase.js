@@ -1,6 +1,6 @@
 import { supabase as sb } from './supabase.js'
 import { groupStories } from './groupStories.js'
-import { withMyHand, HIDDEN } from '../games/server.js'
+import { withMyHand, HIDDEN } from '../games/hidden.js'
 import { isSchemaError, reportApiError } from './errors.js'
 
 // Supabase-ზე მომუშავე API. ინტერფეისი ზუსტად ემთხვევა api.demo.js-ს.
@@ -81,6 +81,8 @@ function humanError(msg = '') {
   if (/duplicate key.*username/i.test(msg)) return 'ეს მომხმარებლის სახელი დაკავებულია'
   if (/Password should be/i.test(msg)) return 'პაროლი მინიმუმ 6 სიმბოლო უნდა იყოს'
   if (/Failed to fetch|NetworkError/i.test(msg)) return 'ინტერნეტთან კავშირი ვერ დამყარდა'
+  if (/TimeoutError|timed out|signal is aborted/i.test(msg)) return 'ინტერნეტი ძალიან ნელია — სცადე ცოტა ხანში'
+  if (/captcha/i.test(msg)) return 'ბოტებისგან დაცვის შემოწმება ვერ გაიარე — სცადე თავიდან'
   return msg
 }
 
@@ -145,15 +147,16 @@ export const api = {
   async updatePassword(password) {
     ok(await sb.auth.updateUser({ password }))
   },
-  async signUp(email, password, fullName) {
-    const res = ok(await sb.auth.signUp({ email, password, options: { data: { full_name: fullName }, emailRedirectTo: location.origin } }))
+  // captchaToken — Cloudflare Turnstile (თუ ჩართულია; იხ. components/Captcha.jsx)
+  async signUp(email, password, fullName, captchaToken) {
+    const res = ok(await sb.auth.signUp({ email, password, options: { data: { full_name: fullName }, emailRedirectTo: location.origin, captchaToken } }))
     return { needsConfirm: !res.session }
   },
-  async signIn(email, password) {
-    ok(await sb.auth.signInWithPassword({ email, password }))
+  async signIn(email, password, captchaToken) {
+    ok(await sb.auth.signInWithPassword({ email, password, options: { captchaToken } }))
   },
-  async resetPassword(email) {
-    ok(await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin }))
+  async resetPassword(email, captchaToken) {
+    ok(await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin, captchaToken }))
   },
   async signOut() {
     await sb.auth.signOut()

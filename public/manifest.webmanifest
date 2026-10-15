@@ -1,17 +1,32 @@
 {
+  "id": "/",
   "name": "ეზო",
   "short_name": "ეზო",
-  "description": "მეგობრები, ვიდეოები, გაცნობა და ნარდი ერთ ადგილას.",
+  "description": "ქართული სოციალური ქსელი: მეგობრები და კლასელები, ნარდი და ჯოკერი ონლაინ, ბაზარი, ჯგუფები და გაცნობა.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#000000",
-  "theme_color": "#c3183f",
+  "background_color": "#f6f4f9",
+  "theme_color": "#f6f4f9",
   "lang": "ka",
+  "dir": "ltr",
+  "categories": ["social", "games", "entertainment"],
+  "prefer_related_applications": false,
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
     { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "shortcuts": [
+    { "name": "მესიჯები", "url": "/inbox", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "თამაშები", "url": "/games", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "შეტყობინებები", "url": "/notifications", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ],
+  "screenshots": [
+    { "src": "/screenshots/narrow-home.webp", "sizes": "780x1688", "type": "image/webp", "form_factor": "narrow", "label": "ფიდი: მეგობრების პოსტები და სთორიები" },
+    { "src": "/screenshots/narrow-games.webp", "sizes": "780x1688", "type": "image/webp", "form_factor": "narrow", "label": "თამაშები: ნარდი, ჭადრაკი, ჯოკერი, ბურა" },
+    { "src": "/screenshots/narrow-chat.webp", "sizes": "780x1688", "type": "image/webp", "form_factor": "narrow", "label": "მესიჯები და ზარები" },
+    { "src": "/screenshots/wide-home.webp", "sizes": "1280x800", "type": "image/webp", "form_factor": "wide", "label": "ეზო კომპიუტერზე" }
   ]
 }

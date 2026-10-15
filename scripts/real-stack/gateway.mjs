@@ -90,10 +90,21 @@ http.createServer((req, res) => {
       return res.end(JSON.stringify({ Key: `${bucket}/${name}`, path: name, id: name }))
     }
     if ((m = url.pathname.match(/^\/storage\/v1\/object\/([^/]+)$/)) && req.method === 'DELETE') {
+      // როგორც Storage-ში: service გასაღებით — ყველაფერი, მომხმარებლით — storage.objects-ის RLS-ით (მხოლოდ თავისი)
       const { prefixes = [] } = JSON.parse(body.toString() || '{}')
-      for (const p of prefixes) rmSync(join(STORE, m[1], p), { force: true })
+      const bucket = m[1].replace(/'/g, "''")
+      const token = (req.headers.authorization || '').replace(/^Bearer /, '')
+      const service = [token, req.headers.apikey].includes(process.env.SERVICE_KEY)
+      const list = prefixes.map((p) => `'${String(p).replace(/'/g, "''")}'`).join(',') || "''"
+      const del = `delete from storage.objects where bucket_id = '${bucket}' and name in (${list}) returning name`
+      let removed = []
+      try {
+        const outp = service ? psql(del) : psql(`begin; set local role authenticated; select set_config('request.jwt.claims', '${JSON.stringify({ sub: sub(token), role: 'authenticated' })}', true); ${del}; commit;`)
+        removed = outp.split('\n').filter((l) => prefixes.includes(l))
+      } catch { removed = [] }
+      for (const p of removed) rmSync(join(STORE, m[1], p), { force: true })
       res.writeHead(200, { ...CORS, 'Content-Type': 'application/json' })
-      return res.end('[]')
+      return res.end(JSON.stringify(removed.map((name) => ({ name, bucket_id: m[1] }))))
     }
     res.writeHead(404, { ...CORS, 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ message: 'not available in the local gateway', path: url.pathname }))

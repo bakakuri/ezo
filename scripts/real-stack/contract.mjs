@@ -313,6 +313,42 @@ await step('A: memories — post from a year ago', async () => {
   must(!(await B.memories()).some((x) => x.id === p.id), 'B sees A memory')
 })
 
+// ---- ეტაპი G: გაღვიძება და საცავის დასუფთავება (api/daily.js — service გასაღებით, როგორც Vercel-ის cron)
+await step('G: deleted post photo removed from storage; story kept while in a highlight', async () => {
+  const keys = Object.fromEntries(readFileSync(`${OUT}/keys.env`, 'utf8').trim().split('\n').map((l) => l.split('=')))
+  const base = process.env.SUPABASE_URL || 'http://localhost:54321'
+  const { cleanup } = await import(pathToFileURL(resolve('api/daily.js')).href)
+  const head = async (u) => (await fetch(u)).status
+  const photo = await A.upload(png(), 'posts')
+  const post = await A.createPost({ body: 'წასაშლელი', media: [{ url: photo, type: 'image', w: 1, h: 1 }] })
+  must((await head(photo)) === 200, 'upload not served')
+  await A.createStory(png(), 'ზღვა')
+  const story = (await A.storyArchive())[0]
+  await A.createHighlight('ზღვა', [story.id])
+  await A.deletePost(post.id)
+  await A.deleteStory(story.id)
+  must(Number(sql(`select count(*) from public.media_trash`)) >= 2, 'trash not filled')
+  sql(`update public.media_trash set created_at = now() - interval '2 hours'`)
+  await cleanup({ url: base, key: 'wrong-key' }).then(() => { throw new Error('cleanup with a wrong key') }, () => {})
+  const r = await cleanup({ url: base, key: keys.SERVICE_KEY })
+  must(r.deleted >= 1 && r.failed === 0, 'cleanup ' + JSON.stringify(r))
+  must((await head(photo)) === 404, 'deleted post photo still served')
+  must((await head(story.media_url)) === 200, 'story in a highlight was deleted')
+  const path = photo.split('/object/public/media/')[1]
+  must(sql(`select count(*) from storage.objects where name = '${path}'`) === '0', 'storage row left')
+  // ჩვეულებრივი მომხმარებელი სხვის ფაილს ვერ შლის
+  const other = await B.upload(png(), 'posts')
+  await fetch(`${base}/storage/v1/object/media`, { method: 'DELETE', headers: { apikey: keys.ANON_KEY, Authorization: `Bearer ${keys.ANON_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ prefixes: [other.split('/object/public/media/')[1]] }) })
+  must((await head(other)) === 200, 'anon deleted a file')
+})
+await step('anon: keep_alive', async () => {
+  const keys = Object.fromEntries(readFileSync(`${OUT}/keys.env`, 'utf8').trim().split('\n').map((l) => l.split('=')))
+  const r = await fetch(`${process.env.SUPABASE_URL || 'http://localhost:54321'}/rest/v1/rpc/keep_alive`, { method: 'POST', headers: { apikey: keys.ANON_KEY, Authorization: `Bearer ${keys.ANON_KEY}`, 'Content-Type': 'application/json' }, body: '{}' })
+  must(r.ok && Date.parse(await r.json()) > 0, 'keep_alive ' + r.status)
+  const denied = await fetch(`${process.env.SUPABASE_URL || 'http://localhost:54321'}/rest/v1/rpc/media_cleanup_take`, { method: 'POST', headers: { apikey: keys.ANON_KEY, Authorization: `Bearer ${keys.ANON_KEY}`, 'Content-Type': 'application/json' }, body: '{}' })
+  must(!denied.ok, 'anon can call media_cleanup_take')
+})
+
 // ---- საჯარო ფუნქციები anon გასაღებით (Vercel-ის og.js და sitemap.js ასე იძახებს)
 await step('anon: og_preview + sitemap_entries', async () => {
   const keys = Object.fromEntries(readFileSync(`${OUT}/keys.env`, 'utf8').trim().split('\n').map((l) => l.split('=')))

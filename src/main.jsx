@@ -7,6 +7,7 @@ import './styles/games.css'
 import './styles/digital.css'
 import { registerServiceWorker } from './lib/push.js'
 import { installErrorReporter } from './lib/errors.js'
+import './lib/install.js' // „დააყენე ეზო“ — მოვლენა ადრე მოდის, ადრევე ვუსმენთ
 
 installErrorReporter()
 registerServiceWorker()

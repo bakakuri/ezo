@@ -1,16 +1,5 @@
 -- ეზო — სქემის ნაწილი 2/8. გაუშვი 1-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.age_of(d date)
-returns int language sql immutable as $$ select extract(year from age(d))::int $$;
-
-create or replace function public.dating_card(dp public.dating_profiles, p public.profiles)
-returns jsonb language sql stable as $$
-  select jsonb_build_object(
-    'id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url,
-    'age', public.age_of(dp.birth_date), 'gender', dp.gender, 'bio', dp.bio, 'photos', dp.photos,
-    'interests', dp.interests, 'city', dp.city, 'last_seen', p.last_seen);
-$$;
-
 create or replace function public.dating_candidates(p_limit int default 20)
 returns setof jsonb language sql stable security definer set search_path = public as $$
   with me as (select * from dating_profiles where user_id = auth.uid() and enabled)
@@ -483,3 +472,25 @@ end $$;
 -- =====================================================================
 --  v2: მოდერაცია, Push შეტყობინებები, თამაშების სერვერი, უსაფრთხოება
 -- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- მოდერაცია. ადმინის დანიშვნა (ერთხელ, SQL Editor-ში):
+--   update public.profiles set role = 'admin' where username = 'შენი_username';
+-- ---------------------------------------------------------------------
+-- 5 სხვადასხვა ადამიანის რეპორტის შემდეგ პოსტი ავტომატურად იმალება
+create or replace function public.on_report()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.target_post is not null and
+     (select count(distinct reporter_id) from reports where target_post = new.target_post and status = 'open') >= 5 then
+    update posts set hidden = true where id = new.target_post;
+  end if;
+  if new.target_listing is not null and
+     (select count(distinct reporter_id) from reports where target_listing = new.target_listing and status = 'open') >= 5 then
+    update listings set hidden = true where id = new.target_listing;
+  end if;
+  return new;
+end $$;
+drop trigger if exists reports_after_insert on public.reports;
+create trigger reports_after_insert after insert on public.reports
+  for each row execute function public.on_report();

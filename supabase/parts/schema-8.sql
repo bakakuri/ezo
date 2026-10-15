@@ -1,135 +1,5 @@
 -- ეზო — სქემის ნაწილი 8/8. გაუშვი 7-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ერთი ძებნა ყველაფერზე. security invoker — RLS მოქმედებს (დახურული პროფილის პოსტები, დამალული და სხვ. არ ჩანს)
-create or replace function public.search_all(p_q text, p_limit int default 20)
-returns jsonb language plpgsql stable security invoker set search_path = public, extensions as $$
-declare
-  raw text := btrim(regexp_replace(coalesce(p_q, ''), '^[#@]+', ''));
-  s text := public.ka_skeleton(btrim(regexp_replace(coalesce(p_q, ''), '^[#@]+', '')));
-  pat text;
-  lim int := greatest(1, least(coalesce(p_limit, 20), 50));
-begin
-  if char_length(s) < 2 then
-    return jsonb_build_object('people', '[]'::jsonb, 'posts', '[]'::jsonb, 'tags', '[]'::jsonb, 'groups', '[]'::jsonb, 'listings', '[]'::jsonb);
-  end if;
-  pat := replace(replace(replace(s, '\', '\\'), '%', '\%'), '_', '\_');
-  return jsonb_build_object(
-    'people', coalesce((select jsonb_agg(to_jsonb(x) - 'rank' - 'sim' order by x.rank, x.sim desc, x.followers_count desc) from (
-        select p.id, p.username, p.full_name, p.avatar_url, p.last_seen, p.verified, p.city, p.followers_count,
-          case when lower(p.username) = lower(raw) then 0
-               when public.ka_skeleton(p.username) like pat || '%' then 1
-               when public.ka_skeleton(p.full_name) like pat || '%' or public.ka_skeleton(p.full_name) like '% ' || pat || '%' then 2
-               when public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, '')) like '%' || pat || '%' then 3
-               else 4 end as rank,
-          word_similarity(s, public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, ''))) as sim
-        from profiles p
-        where p.onboarded and (p.banned_until is null or p.banned_until < now())
-          and (public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, '')) like '%' || pat || '%'
-               or (char_length(s) >= 4 and s <% public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, ''))))
-        order by rank, sim desc, p.followers_count desc
-        limit lim) x), '[]'::jsonb),
-    'posts', coalesce((select jsonb_agg(x.id order by x.created_at desc) from (
-        select p.id, p.created_at from posts p
-        where p.parent_id is null and not p.hidden and public.ka_skeleton(p.body) like '%' || pat || '%'
-        order by p.created_at desc limit lim) x), '[]'::jsonb),
-    'tags', coalesce((select jsonb_agg(jsonb_build_object('tag', x.t, 'posts', x.n) order by x.n desc) from (
-        select t, count(*) as n from posts p, unnest(p.hashtags) as t
-        where public.ka_skeleton(t) like pat || '%'
-        group by t order by count(*) desc limit 8) x), '[]'::jsonb),
-    'groups', coalesce((select jsonb_agg(to_jsonb(x) order by x.members_count desc) from (
-        select g.id, g.slug, g.name, g.cover_url, g.privacy, g.members_count from groups g
-        where public.ka_skeleton(g.name) like '%' || pat || '%'
-        order by g.members_count desc limit 8) x), '[]'::jsonb),
-    'listings', coalesce((select jsonb_agg(to_jsonb(x) order by x.at desc) from (
-        select l.id, l.title, l.price, l.currency, l.city, coalesce(l.thumb, l.photos ->> 0) as photo, coalesce(l.bumped_at, l.created_at) as at
-        from listings l
-        where l.status in ('active', 'reserved') and not l.hidden and public.ka_skeleton(l.title) like '%' || pat || '%'
-        order by coalesce(l.bumped_at, l.created_at) desc limit 8) x), '[]'::jsonb));
-end $$;
-
--- =====================================================================
--- ეტაპი D: შეტყობინებების პარამეტრები და ადმინის ანალიტიკა
--- =====================================================================
-
--- ---- შეტყობინებების პარამეტრები: რომელი Push მოვიდეს და „ჩუმი საათები“ (თბილისის დროით; ზარები მაინც მოდის)
-create table if not exists public.notification_prefs (
-  user_id uuid primary key default auth.uid() references public.profiles on delete cascade,
-  messages boolean not null default true,
-  calls boolean not null default true,
-  replies boolean not null default true,
-  likes boolean not null default true,
-  follows boolean not null default true,
-  games boolean not null default true,
-  dating boolean not null default true,
-  market boolean not null default true,
-  groups boolean not null default true,
-  rewards boolean not null default true,
-  quiet_from smallint check (quiet_from between 0 and 23),
-  quiet_to smallint check (quiet_to between 0 and 23),
-  updated_at timestamptz not null default now()
-);
-alter table public.notification_prefs enable row level security;
-drop policy if exists "own prefs" on public.notification_prefs;
-create policy "own prefs" on public.notification_prefs for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-grant select, insert, update on public.notification_prefs to authenticated;
-
--- Push-ის კატეგორია მისი tag-ით (conv-, call-, game-, n-<ტიპი>-)
-create or replace function public.push_category(p_payload jsonb)
-returns text language sql immutable as $$
-  select case
-    when p_payload ->> 'tag' like 'conv-%' then 'messages'
-    when p_payload ->> 'tag' like 'call-%' then 'calls'
-    when p_payload ->> 'tag' like 'game-%' then 'games'
-    when p_payload ->> 'tag' ~ '^n-(reply|quote)-' then 'replies'
-    when p_payload ->> 'tag' ~ '^n-like-' then 'likes'
-    when p_payload ->> 'tag' ~ '^n-(follow|follow_request|follow_accept|invite_joined)-' then 'follows'
-    when p_payload ->> 'tag' ~ '^n-(game_invite|tournament_start|tournament_end)-' then 'games'
-    when p_payload ->> 'tag' ~ '^n-match-' then 'dating'
-    when p_payload ->> 'tag' ~ '^n-listing_price-' then 'market'
-    when p_payload ->> 'tag' ~ '^n-(group_request|group_approved|event_rsvp)-' then 'groups'
-    when p_payload ->> 'tag' ~ '^n-(gift|achievement|level_up)-' then 'rewards'
-    else 'other' end;
-$$;
-
-create or replace function public.push_allowed(p_user uuid, p_payload jsonb)
-returns boolean language plpgsql stable security definer set search_path = public as $$
-declare v jsonb; v_cat text := public.push_category(p_payload); v_from int; v_to int; v_hour int;
-begin
-  select to_jsonb(p) into v from notification_prefs p where p.user_id = p_user;
-  if v is null then return true; end if;
-  if v ? v_cat and (v ->> v_cat)::boolean is false then return false; end if;
-  v_from := (v ->> 'quiet_from')::int;
-  v_to := (v ->> 'quiet_to')::int;
-  if v_cat <> 'calls' and v_from is not null and v_to is not null and v_from <> v_to then
-    v_hour := extract(hour from now() at time zone 'Asia/Tbilisi')::int;
-    if (v_from < v_to and v_hour >= v_from and v_hour < v_to) or (v_from > v_to and (v_hour >= v_from or v_hour < v_to)) then
-      return false;
-    end if;
-  end if;
-  return true;
-end $$;
-
--- Push-ის გაგზავნა Edge Function „push“-ით (მხოლოდ თუ პარამეტრები უშვებს)
-create or replace function public.push_dispatch(p_user uuid, p_payload jsonb)
-returns void language plpgsql security definer set search_path = public as $$
-declare v_url text; v_secret text;
-begin
-  if p_user is null then return; end if;
-  select value into v_url from app_secrets where key = 'push_url';
-  if v_url is null then return; end if;
-  if not exists (select 1 from push_subscriptions where user_id = p_user) then return; end if;
-  if not public.push_allowed(p_user, p_payload) then return; end if;
-  select value into v_secret from app_secrets where key = 'push_secret';
-  perform net.http_post(
-    url := v_url,
-    body := jsonb_build_object('user_id', p_user, 'payload', p_payload),
-    headers := jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', coalesce(v_secret, '')));
-exception when others then
-  raise warning 'push_dispatch: %', sqlerrm;
-end $$;
-revoke execute on function public.push_dispatch(uuid, jsonb) from public, anon, authenticated;
-revoke execute on function public.push_allowed(uuid, jsonb) from public, anon, authenticated;
-
 -- ---- აქტიურობა დღეების მიხედვით (ანალიტიკისთვის): აპი ყოველ 2 წუთში იძახებს touch_last_seen-ს
 create table if not exists public.daily_active (
   day date not null,
@@ -444,3 +314,126 @@ returns setof public.posts language sql stable security invoker set search_path 
   order by p.created_at desc
   limit 3;
 $$;
+
+-- =====================================================================
+-- ეტაპი G: „გაღვიძება“ და საცავის დასუფთავება
+-- =====================================================================
+
+-- ---- გაღვიძება: Supabase-ის უფასო პროექტი 7 დღის უმოქმედობის შემდეგ ჩერდება.
+-- Vercel-ის ყოველდღიური cron (api/daily.js) ამას იძახებს — ერთი მარტივი მოთხოვნა ბაზაში საკმარისია.
+create or replace function public.keep_alive()
+returns timestamptz language sql stable as $$ select now() $$;
+grant execute on function public.keep_alive() to anon, authenticated, service_role;
+
+-- ---- წაშლილი ფოტოების, ვიდეოების და ხმოვანების დასუფთავება საცავიდან (bucket „media“).
+-- 1) ტრიგერები: როცა ჩანაწერი იშლება ან ფოტო იცვლება, ძველი ფაილის გზა რიგში (media_trash) ჩადის;
+-- 2) api/daily.js (service გასაღებით) დღეში ერთხელ იღებს რიგს — media_cleanup_take — და შლის მხოლოდ იმას,
+--    რასაც აღარაფერი იყენებს (media_in_use: მაგ. სთორი ჰაილაითში ან ჩატში პასუხად რჩება);
+-- 3) ატვირთული, მაგრამ არსად მიმაგრებული ფაილები (გაუქმებული პოსტი, შეუნახავი ავატარი) — დღე-ნახევრის შემდეგ.
+-- ახალი სვეტი ფოტოთი? დაამატე media_collect ტრიგერში და media_in_use-ში.
+create table if not exists public.media_trash (
+  path text primary key,
+  created_at timestamptz not null default now()
+);
+alter table public.media_trash enable row level security;
+revoke all on public.media_trash from anon, authenticated;
+
+-- რომელი ფაილებიდან დაიწყო ძებნა (მხოლოდ ამ განახლების შემდეგ ატვირთულები — ძველს არ ვეხებით)
+create table if not exists public.media_sweep (
+  id boolean primary key default true check (id),
+  last_at timestamptz not null default now()
+);
+insert into public.media_sweep default values on conflict do nothing;
+alter table public.media_sweep enable row level security;
+revoke all on public.media_sweep from anon, authenticated;
+
+-- ჩვენი საცავის გზები ნებისმიერი მნიშვნელობიდან (ტექსტი, jsonb, მთელი ჩანაწერი)
+create or replace function public.media_paths(v jsonb)
+returns setof text language sql immutable as $$
+  select distinct m[1] from regexp_matches(coalesce(v::text, ''), '/storage/v1/object/public/media/([^"?#\s\\]+)', 'g') as m
+$$;
+
+create or replace function public.media_collect()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into media_trash (path)
+  select p from public.media_paths(to_jsonb(old)) p
+  where tg_op = 'DELETE' or p not in (select public.media_paths(to_jsonb(new)))
+  on conflict (path) do nothing;
+  return null;
+end $$;
+
+do $$ declare t record; begin
+  for t in select * from (values
+    ('profiles', 'avatar_url'), ('posts', 'media'), ('stories', null), ('messages', 'media_url, meta'),
+    ('dating_profiles', 'photos'), ('groups', 'cover_url'), ('events', 'cover_url'), ('highlights', 'cover_url'),
+    ('highlight_items', null), ('listings', 'photos, thumb'), ('conversations', 'avatar_url')) as v(tbl, cols)
+  loop
+    execute format('drop trigger if exists media_collect on public.%I', t.tbl);
+    execute format('create trigger media_collect after delete%s on public.%I for each row execute function public.media_collect()',
+      case when t.cols is null then '' else ' or update of ' || t.cols end, t.tbl);
+  end loop;
+end $$;
+
+-- ფაილს ჯერ კიდევ რამე იყენებს? გზის პირველი საქაღალდე ამტვირთავის id-ია — დიდ ცხრილებში მხოლოდ მის ჩანაწერებს ვამოწმებთ.
+-- უცნობი ფორმის გზა — ყოველთვის „გამოიყენება“ (არასდროს წაიშლება).
+create or replace function public.media_in_use(p text)
+returns boolean language plpgsql stable security definer set search_path = public as $$
+declare o uuid;
+begin
+  if p is null or split_part(p, '/', 1) !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then return true; end if;
+  o := split_part(p, '/', 1)::uuid;
+  return exists (select 1 from profiles where strpos(coalesce(avatar_url, ''), p) > 0)
+    or exists (select 1 from groups where strpos(coalesce(cover_url, ''), p) > 0)
+    or exists (select 1 from events where strpos(coalesce(cover_url, ''), p) > 0)
+    or exists (select 1 from conversations where strpos(coalesce(avatar_url, ''), p) > 0)
+    or exists (select 1 from posts where author_id = o and strpos(media::text, p) > 0)
+    or exists (select 1 from stories where author_id = o and strpos(media_url, p) > 0)
+    or exists (select 1 from highlights h where h.owner_id = o and (strpos(coalesce(h.cover_url, ''), p) > 0
+               or exists (select 1 from highlight_items i where i.highlight_id = h.id and strpos(i.media_url, p) > 0)))
+    or exists (select 1 from listings where seller_id = o and (strpos(photos::text, p) > 0 or strpos(coalesce(thumb, ''), p) > 0))
+    or exists (select 1 from dating_profiles where user_id = o and strpos(photos::text, p) > 0)
+    or exists (select 1 from messages m join conversation_members c on c.conversation_id = m.conversation_id and c.user_id = o
+               where strpos(coalesce(m.media_url, '') || coalesce(m.meta::text, ''), p) > 0);
+end $$;
+
+-- დღიური დასუფთავება: აბრუნებს წასაშლელ გზებს (მაქს. p_limit) და რიგიდან იღებს
+create or replace function public.media_cleanup_take(p_limit int default 200)
+returns text[] language plpgsql security definer set search_path = public as $$
+declare
+  n int := least(greatest(coalesce(p_limit, 200), 1), 1000);
+  out text[] := '{}';
+  r record;
+  cur timestamptz;
+begin
+  -- 1) წაშლილი შიგთავსის ფაილები — საათის შემდეგ (თუ ფოტო ისევ სადმე გამოიყენება, რჩება)
+  for r in select path from media_trash where created_at < now() - interval '1 hour' order by created_at limit n for update skip locked loop
+    delete from media_trash where path = r.path;
+    if not public.media_in_use(r.path) then out := out || r.path; end if;
+  end loop;
+  -- 2) ატვირთული, მაგრამ არსად მიმაგრებული — ერთი დღის შემდეგ, თითოეული ერთხელ (media_sweep.last_at-დან)
+  select last_at into cur from media_sweep where id for update;
+  if cur is not null and cardinality(out) < n then
+    for r in select o.name, o.created_at from storage.objects o
+             where o.bucket_id = 'media' and o.created_at > cur and o.created_at < now() - interval '1 day'
+             order by o.created_at limit n * 2 loop
+      cur := r.created_at;
+      if not (r.name = any(out)) and not public.media_in_use(r.name) then out := out || r.name; end if;
+      exit when cardinality(out) >= n;
+    end loop;
+    update media_sweep set last_at = cur where id;
+  end if;
+  return out;
+end $$;
+
+-- საცავმა თუ ვერ წაშალა — რიგში ბრუნდება, შემდეგ ჯერზე ვცდით
+create or replace function public.media_cleanup_return(p_paths text[])
+returns void language sql security definer set search_path = public as $$
+  insert into media_trash (path, created_at) select unnest(p_paths), now() - interval '2 hours' on conflict (path) do nothing
+$$;
+
+revoke execute on function public.media_in_use(text) from public, anon, authenticated;
+revoke execute on function public.media_cleanup_take(int) from public, anon, authenticated;
+revoke execute on function public.media_cleanup_return(text[]) from public, anon, authenticated;
+grant execute on function public.media_cleanup_take(int) to service_role;
+grant execute on function public.media_cleanup_return(text[]) to service_role;

@@ -1,40 +1,5 @@
 -- ეზო — სქემის ნაწილი 4/8. გაუშვი 3-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.create_group_chat(p_title text, p_members uuid[])
-returns uuid language plpgsql security definer set search_path = public as $$
-declare v_id uuid; v_user uuid; v_title text := btrim(coalesce(p_title, ''));
-begin
-  if not public.can_act() then raise exception 'ანგარიში შეზღუდულია'; end if;
-  if char_length(v_title) < 1 or char_length(v_title) > 80 then raise exception 'ჩატის სახელი 1–80 სიმბოლო'; end if;
-  if coalesce(array_length(p_members, 1), 0) < 1 or array_length(p_members, 1) > 50 then raise exception 'აირჩიე 1–50 მონაწილე'; end if;
-  insert into conversations (kind, title, created_by) values ('group', v_title, auth.uid()) returning id into v_id;
-  insert into conversation_members (conversation_id, user_id, role) values (v_id, auth.uid(), 'admin');
-  foreach v_user in array p_members loop
-    if v_user <> auth.uid() and not public.is_blocked(auth.uid(), v_user) and exists (select 1 from profiles where id = v_user) then
-      insert into conversation_members (conversation_id, user_id) values (v_id, v_user) on conflict do nothing;
-    end if;
-  end loop;
-  insert into messages (conversation_id, sender_id, body, meta)
-  values (v_id, auth.uid(), 'შექმნა ჩატი „' || v_title || '“', '{"system": true}');
-  return v_id;
-end $$;
-
-create or replace function public.add_chat_members(p_conv uuid, p_members uuid[])
-returns void language plpgsql security definer set search_path = public as $$
-declare v_user uuid; v_names text;
-begin
-  if public.chat_role(p_conv) is distinct from 'admin' or (select kind from conversations where id = p_conv) <> 'group' then
-    raise exception 'მხოლოდ ჩატის ადმინისთვის';
-  end if;
-  foreach v_user in array p_members loop
-    if not public.is_blocked(auth.uid(), v_user) and exists (select 1 from profiles where id = v_user) then
-      insert into conversation_members (conversation_id, user_id) values (p_conv, v_user) on conflict do nothing;
-    end if;
-  end loop;
-  select string_agg(coalesce(nullif(split_part(full_name, ' ', 1), ''), username), ', ') into v_names from profiles where id = any(p_members);
-  insert into messages (conversation_id, sender_id, body, meta) values (p_conv, auth.uid(), 'დაამატა: ' || coalesce(v_names, ''), '{"system": true}');
-end $$;
-
 create or replace function public.leave_chat(p_conv uuid)
 returns void language plpgsql security definer set search_path = public as $$
 begin
@@ -462,3 +427,73 @@ begin
 exception when others then
   raise notice 'ტურნირების ტაიმერი ვერ ჩაირთო: %', sqlerrm;
 end $$;
+
+-- =====================================================================
+--  v6: სოციალური — დახურული პროფილი, გამოწერის თხოვნები, გამოკითხვები,
+--  შენახული პოსტები და კოლექციები, სთორის ჰაილაითები, „ახლო მეგობრები“
+-- =====================================================================
+create table if not exists public.follow_requests (
+  requester_id uuid references public.profiles on delete cascade,
+  target_id uuid references public.profiles on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (requester_id, target_id),
+  check (requester_id <> target_id)
+);
+create index if not exists follow_requests_target_idx on public.follow_requests (target_id, created_at desc);
+
+-- გამოწერა: ღია პროფილზე — მაშინვე, დახურულზე — თხოვნა
+create or replace function public.follow_user(p_target uuid)
+returns text language plpgsql security definer set search_path = public as $$
+begin
+  if not public.can_act() then raise exception 'ანგარიში დროებით შეზღუდულია'; end if;
+  if p_target = auth.uid() then raise exception 'საკუთარ თავს ვერ გამოიწერ'; end if;
+  if public.is_blocked(auth.uid(), p_target) then raise exception 'ამ ადამიანს ვერ გამოიწერ'; end if;
+  if exists (select 1 from follows where follower_id = auth.uid() and following_id = p_target) then return 'following'; end if;
+  if (select count(*) from follows where follower_id = auth.uid() and created_at > now() - interval '1 hour') >= 150 then
+    raise exception 'ძალიან ბევრი გამოწერა ცოტა ხანში — სცადე მოგვიანებით';
+  end if;
+  if public.is_private_profile(p_target) then
+    insert into follow_requests (requester_id, target_id) values (auth.uid(), p_target) on conflict do nothing;
+    if found then
+      insert into notifications (user_id, actor_id, type) values (p_target, auth.uid(), 'follow_request');
+    end if;
+    return 'requested';
+  end if;
+  insert into follows (follower_id, following_id) values (auth.uid(), p_target) on conflict do nothing;
+  return 'following';
+end $$;
+
+create or replace function public.unfollow_user(p_target uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  delete from follows where follower_id = auth.uid() and following_id = p_target;
+  delete from follow_requests where requester_id = auth.uid() and target_id = p_target;
+end $$;
+
+create or replace function public.respond_follow_request(p_requester uuid, p_accept boolean)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  delete from follow_requests where requester_id = p_requester and target_id = auth.uid();
+  if not found then return; end if;
+  delete from notifications where user_id = auth.uid() and actor_id = p_requester and type = 'follow_request';
+  if p_accept and not public.is_blocked(auth.uid(), p_requester) then
+    insert into follows (follower_id, following_id) values (p_requester, auth.uid()) on conflict do nothing;
+    insert into notifications (user_id, actor_id, type) values (p_requester, auth.uid(), 'follow_accept');
+  end if;
+end $$;
+
+-- პროფილის გახსნისას ყველა მოლოდინში მყოფი თხოვნა დასტურდება
+create or replace function public.on_profile_privacy()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if old.is_private and not new.is_private then
+    insert into follows (follower_id, following_id)
+    select requester_id, target_id from follow_requests where target_id = new.id
+    on conflict do nothing;
+    delete from follow_requests where target_id = new.id;
+  end if;
+  return new;
+end $$;
+drop trigger if exists profiles_privacy on public.profiles;
+create trigger profiles_privacy after update of is_private on public.profiles
+  for each row execute function public.on_profile_privacy();

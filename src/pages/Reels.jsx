@@ -8,6 +8,7 @@ import { Link, useLocation } from '../lib/router.jsx'
 import { count } from '../lib/format.js'
 import { useAuth } from '../lib/auth.jsx'
 import { useToast } from '../components/Toast.jsx'
+import { useSaver, saving } from '../lib/net.js'
 
 export default function Reels() {
   const { query } = useLocation()
@@ -68,7 +69,8 @@ export default function Reels() {
 
 function Reel({ reel: initial, muted, onVisible, onComments }) {
   const [reel, setReel] = useState(initial)
-  const [playing, setPlaying] = useState(true)
+  const saver = useSaver()
+  const [playing, setPlaying] = useState(!saving())
   const [hearts, setHearts] = useState([])
   const [followed, setFollowed] = useState(false)
   const { me } = useAuth()
@@ -83,9 +85,11 @@ function Reel({ reel: initial, muted, onVisible, onComments }) {
       const v = video.current
       if (en.isIntersecting) {
         onVisible()
+        // ტრაფიკის დაზოგვისას ვიდეო თავისით არ ირთვება — შეხებით
+        if (saving()) { setPlaying(false); return }
         setPlaying(true)
         if (v) { v.currentTime = 0; v.play().catch(() => {}) }
-      } else if (v) v.pause()
+      } else if (v) { v.pause(); if (saving()) setPlaying(false) }
     }, { threshold: 0.65 })
     io.observe(box.current)
     return () => io.disconnect()
@@ -128,7 +132,7 @@ function Reel({ reel: initial, muted, onVisible, onComments }) {
     <section className="reel" ref={box} aria-label={`ვიდეო: ${a.full_name}`}>
       <div className="frame" onClick={tap}>
         {m?.type === 'video'
-          ? <video ref={video} src={m.url} loop playsInline muted={muted} preload="metadata" />
+          ? <video ref={video} src={m.url} loop playsInline muted={muted} preload={saver ? 'none' : 'metadata'} />
           : <img className="kb" src={m?.url} alt="" />}
       </div>
       <div className="shade" />

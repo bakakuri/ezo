@@ -1,73 +1,5 @@
 -- ეზო — სქემის ნაწილი 7/8. გაუშვი 6-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- ---- მოწვევა: ახალი მომხმარებელი (7 დღემდე) ერთხელ იღებს; ორივე ერთმანეთს იწერს, ორივე იღებს ბროწეულს
-create or replace function public.claim_invite(p_username text)
-returns jsonb language plpgsql security definer set search_path = public as $$
-declare v_inv profiles; v_me profiles;
-begin
-  select * into v_me from profiles where id = auth.uid();
-  if v_me.id is null then raise exception 'not signed in'; end if;
-  select * into v_inv from profiles where username = lower(btrim(p_username));
-  if v_inv.id is null or v_inv.id = v_me.id or not v_inv.onboarded then return jsonb_build_object('ok', false, 'reason', 'unknown'); end if;
-  if v_me.invited_by is not null or v_me.created_at < now() - interval '7 days' then return jsonb_build_object('ok', false, 'reason', 'old'); end if;
-  if public.is_blocked(v_me.id, v_inv.id) then return jsonb_build_object('ok', false, 'reason', 'blocked'); end if;
-  update profiles set invited_by = v_inv.id where id = v_me.id;
-  perform public.follow_user(v_inv.id);
-  insert into follows (follower_id, following_id) values (v_inv.id, v_me.id) on conflict do nothing;
-  perform public.award(v_inv.id, 'invite', 10, 20, v_me.id::text);
-  perform public.award(v_me.id, 'invited', 0, 10, 'invited');
-  insert into notifications (user_id, actor_id, type) values (v_inv.id, v_me.id, 'invite_joined');
-  return jsonb_build_object('ok', true, 'inviter', v_inv.username);
-end $$;
-
-create or replace function public.invite_stats()
-returns jsonb language sql stable security definer set search_path = public as $$
-  select jsonb_build_object('count', (select count(*) from profiles where invited_by = auth.uid()),
-    'recent', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'username', username, 'full_name', full_name, 'avatar_url', avatar_url) order by created_at desc)
-                          from (select * from profiles where invited_by = auth.uid() order by created_at desc limit 12) x), '[]'::jsonb));
-$$;
-
--- ---- სპამის ლიმიტები (პირდაპირი ჩანაწერებისთვის; სერვერული ფუნქციები თავისით ამოწმებს)
--- მხოლოდ საკუთარი ჩანაწერები ითვლება (auth.uid())
-drop function if exists public.rate_count(text, uuid, timestamptz);
-create or replace function public.rate_count(p_table text, p_since timestamptz)
-returns int language plpgsql stable security definer set search_path = public as $$
-declare u uuid := auth.uid();
-begin
-  return case p_table
-    when 'posts' then (select count(*) from posts where author_id = u and created_at > p_since)
-    when 'messages' then (select count(*) from messages where sender_id = u and created_at > p_since)
-    when 'reports' then (select count(*) from reports where reporter_id = u and created_at > p_since)
-    when 'stories' then (select count(*) from stories where author_id = u and created_at > p_since)
-    else 0 end;
-end $$;
-
-create or replace function public.rate_guard()
-returns trigger language plpgsql security invoker set search_path = public as $$
-declare v_max int; v_win interval;
-begin
-  if current_user not in ('authenticated', 'anon') or public.is_staff() then return new; end if;
-  case tg_table_name
-    when 'posts' then v_max := 20; v_win := interval '10 minutes';
-    when 'messages' then v_max := 40; v_win := interval '1 minute';
-    when 'reports' then v_max := 20; v_win := interval '1 day';
-    when 'stories' then v_max := 30; v_win := interval '1 day';
-    else return new;
-  end case;
-  if public.rate_count(tg_table_name, now() - v_win) >= v_max then
-    raise exception 'ძალიან ხშირად — სცადე ცოტა ხანში';
-  end if;
-  return new;
-end $$;
-drop trigger if exists rate_guard on public.posts;
-create trigger rate_guard before insert on public.posts for each row execute function public.rate_guard();
-drop trigger if exists rate_guard on public.messages;
-create trigger rate_guard before insert on public.messages for each row execute function public.rate_guard();
-drop trigger if exists rate_guard on public.reports;
-create trigger rate_guard before insert on public.reports for each row execute function public.rate_guard();
-drop trigger if exists rate_guard on public.stories;
-create trigger rate_guard before insert on public.stories for each row execute function public.rate_guard();
-
 -- ---- აკრძალული სიტყვები (მოდერატორი მართავს)
 create table if not exists public.banned_words (
   word text primary key check (char_length(word) between 2 and 60 and word = lower(word)),
@@ -431,3 +363,133 @@ begin
   execute format('create index if not exists groups_search_trgm on public.groups using gin (public.ka_skeleton(name) %I.gin_trgm_ops)', s);
   execute format('create index if not exists listings_search_trgm on public.listings using gin (public.ka_skeleton(title) %I.gin_trgm_ops)', s);
 end $$;
+
+-- ერთი ძებნა ყველაფერზე. security invoker — RLS მოქმედებს (დახურული პროფილის პოსტები, დამალული და სხვ. არ ჩანს)
+create or replace function public.search_all(p_q text, p_limit int default 20)
+returns jsonb language plpgsql stable security invoker set search_path = public, extensions as $$
+declare
+  raw text := btrim(regexp_replace(coalesce(p_q, ''), '^[#@]+', ''));
+  s text := public.ka_skeleton(btrim(regexp_replace(coalesce(p_q, ''), '^[#@]+', '')));
+  pat text;
+  lim int := greatest(1, least(coalesce(p_limit, 20), 50));
+begin
+  if char_length(s) < 2 then
+    return jsonb_build_object('people', '[]'::jsonb, 'posts', '[]'::jsonb, 'tags', '[]'::jsonb, 'groups', '[]'::jsonb, 'listings', '[]'::jsonb);
+  end if;
+  pat := replace(replace(replace(s, '\', '\\'), '%', '\%'), '_', '\_');
+  return jsonb_build_object(
+    'people', coalesce((select jsonb_agg(to_jsonb(x) - 'rank' - 'sim' order by x.rank, x.sim desc, x.followers_count desc) from (
+        select p.id, p.username, p.full_name, p.avatar_url, p.last_seen, p.verified, p.city, p.followers_count,
+          case when lower(p.username) = lower(raw) then 0
+               when public.ka_skeleton(p.username) like pat || '%' then 1
+               when public.ka_skeleton(p.full_name) like pat || '%' or public.ka_skeleton(p.full_name) like '% ' || pat || '%' then 2
+               when public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, '')) like '%' || pat || '%' then 3
+               else 4 end as rank,
+          word_similarity(s, public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, ''))) as sim
+        from profiles p
+        where p.onboarded and (p.banned_until is null or p.banned_until < now())
+          and (public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, '')) like '%' || pat || '%'
+               or (char_length(s) >= 4 and s <% public.ka_skeleton(coalesce(p.full_name, '') || ' ' || coalesce(p.username, ''))))
+        order by rank, sim desc, p.followers_count desc
+        limit lim) x), '[]'::jsonb),
+    'posts', coalesce((select jsonb_agg(x.id order by x.created_at desc) from (
+        select p.id, p.created_at from posts p
+        where p.parent_id is null and not p.hidden and public.ka_skeleton(p.body) like '%' || pat || '%'
+        order by p.created_at desc limit lim) x), '[]'::jsonb),
+    'tags', coalesce((select jsonb_agg(jsonb_build_object('tag', x.t, 'posts', x.n) order by x.n desc) from (
+        select t, count(*) as n from posts p, unnest(p.hashtags) as t
+        where public.ka_skeleton(t) like pat || '%'
+        group by t order by count(*) desc limit 8) x), '[]'::jsonb),
+    'groups', coalesce((select jsonb_agg(to_jsonb(x) order by x.members_count desc) from (
+        select g.id, g.slug, g.name, g.cover_url, g.privacy, g.members_count from groups g
+        where public.ka_skeleton(g.name) like '%' || pat || '%'
+        order by g.members_count desc limit 8) x), '[]'::jsonb),
+    'listings', coalesce((select jsonb_agg(to_jsonb(x) order by x.at desc) from (
+        select l.id, l.title, l.price, l.currency, l.city, coalesce(l.thumb, l.photos ->> 0) as photo, coalesce(l.bumped_at, l.created_at) as at
+        from listings l
+        where l.status in ('active', 'reserved') and not l.hidden and public.ka_skeleton(l.title) like '%' || pat || '%'
+        order by coalesce(l.bumped_at, l.created_at) desc limit 8) x), '[]'::jsonb));
+end $$;
+
+-- =====================================================================
+-- ეტაპი D: შეტყობინებების პარამეტრები და ადმინის ანალიტიკა
+-- =====================================================================
+
+-- ---- შეტყობინებების პარამეტრები: რომელი Push მოვიდეს და „ჩუმი საათები“ (თბილისის დროით; ზარები მაინც მოდის)
+create table if not exists public.notification_prefs (
+  user_id uuid primary key default auth.uid() references public.profiles on delete cascade,
+  messages boolean not null default true,
+  calls boolean not null default true,
+  replies boolean not null default true,
+  likes boolean not null default true,
+  follows boolean not null default true,
+  games boolean not null default true,
+  dating boolean not null default true,
+  market boolean not null default true,
+  groups boolean not null default true,
+  rewards boolean not null default true,
+  quiet_from smallint check (quiet_from between 0 and 23),
+  quiet_to smallint check (quiet_to between 0 and 23),
+  updated_at timestamptz not null default now()
+);
+alter table public.notification_prefs enable row level security;
+drop policy if exists "own prefs" on public.notification_prefs;
+create policy "own prefs" on public.notification_prefs for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+grant select, insert, update on public.notification_prefs to authenticated;
+
+-- Push-ის კატეგორია მისი tag-ით (conv-, call-, game-, n-<ტიპი>-)
+create or replace function public.push_category(p_payload jsonb)
+returns text language sql immutable as $$
+  select case
+    when p_payload ->> 'tag' like 'conv-%' then 'messages'
+    when p_payload ->> 'tag' like 'call-%' then 'calls'
+    when p_payload ->> 'tag' like 'game-%' then 'games'
+    when p_payload ->> 'tag' ~ '^n-(reply|quote)-' then 'replies'
+    when p_payload ->> 'tag' ~ '^n-like-' then 'likes'
+    when p_payload ->> 'tag' ~ '^n-(follow|follow_request|follow_accept|invite_joined)-' then 'follows'
+    when p_payload ->> 'tag' ~ '^n-(game_invite|tournament_start|tournament_end)-' then 'games'
+    when p_payload ->> 'tag' ~ '^n-match-' then 'dating'
+    when p_payload ->> 'tag' ~ '^n-listing_price-' then 'market'
+    when p_payload ->> 'tag' ~ '^n-(group_request|group_approved|event_rsvp)-' then 'groups'
+    when p_payload ->> 'tag' ~ '^n-(gift|achievement|level_up)-' then 'rewards'
+    else 'other' end;
+$$;
+
+create or replace function public.push_allowed(p_user uuid, p_payload jsonb)
+returns boolean language plpgsql stable security definer set search_path = public as $$
+declare v jsonb; v_cat text := public.push_category(p_payload); v_from int; v_to int; v_hour int;
+begin
+  select to_jsonb(p) into v from notification_prefs p where p.user_id = p_user;
+  if v is null then return true; end if;
+  if v ? v_cat and (v ->> v_cat)::boolean is false then return false; end if;
+  v_from := (v ->> 'quiet_from')::int;
+  v_to := (v ->> 'quiet_to')::int;
+  if v_cat <> 'calls' and v_from is not null and v_to is not null and v_from <> v_to then
+    v_hour := extract(hour from now() at time zone 'Asia/Tbilisi')::int;
+    if (v_from < v_to and v_hour >= v_from and v_hour < v_to) or (v_from > v_to and (v_hour >= v_from or v_hour < v_to)) then
+      return false;
+    end if;
+  end if;
+  return true;
+end $$;
+
+-- Push-ის გაგზავნა Edge Function „push“-ით (მხოლოდ თუ პარამეტრები უშვებს)
+create or replace function public.push_dispatch(p_user uuid, p_payload jsonb)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_url text; v_secret text;
+begin
+  if p_user is null then return; end if;
+  select value into v_url from app_secrets where key = 'push_url';
+  if v_url is null then return; end if;
+  if not exists (select 1 from push_subscriptions where user_id = p_user) then return; end if;
+  if not public.push_allowed(p_user, p_payload) then return; end if;
+  select value into v_secret from app_secrets where key = 'push_secret';
+  perform net.http_post(
+    url := v_url,
+    body := jsonb_build_object('user_id', p_user, 'payload', p_payload),
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', coalesce(v_secret, '')));
+exception when others then
+  raise warning 'push_dispatch: %', sqlerrm;
+end $$;
+revoke execute on function public.push_dispatch(uuid, jsonb) from public, anon, authenticated;
+revoke execute on function public.push_allowed(uuid, jsonb) from public, anon, authenticated;

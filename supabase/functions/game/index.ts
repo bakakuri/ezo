@@ -1386,6 +1386,9 @@ function outcome(type, state) {
   return { over: false };
 }
 
+// src/games/hidden.js
+var HIDDEN = /* @__PURE__ */ new Set(["domino", "durak", "joker", "bura"]);
+
 // src/games/server.js
 var IllegalMove = class extends Error {
   constructor(msg = "\u10D4\u10E1 \u10E1\u10D5\u10DA\u10D0 \u10D0\u10E0 \u10E8\u10D4\u10D8\u10EB\u10DA\u10D4\u10D1\u10D0") {
@@ -1394,7 +1397,6 @@ var IllegalMove = class extends Error {
   }
 };
 var same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
-var HIDDEN = /* @__PURE__ */ new Set(["domino", "durak", "joker", "bura"]);
 function initFor(type, rand = cryptoRand, opts = {}) {
   if (type === "domino") return initState4(rand);
   if (type === "durak") return initState6(rand);

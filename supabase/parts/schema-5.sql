@@ -1,75 +1,5 @@
 -- ეზო — სქემის ნაწილი 5/8. გაუშვი 4-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
--- =====================================================================
---  v6: სოციალური — დახურული პროფილი, გამოწერის თხოვნები, გამოკითხვები,
---  შენახული პოსტები და კოლექციები, სთორის ჰაილაითები, „ახლო მეგობრები“
--- =====================================================================
-create table if not exists public.follow_requests (
-  requester_id uuid references public.profiles on delete cascade,
-  target_id uuid references public.profiles on delete cascade,
-  created_at timestamptz not null default now(),
-  primary key (requester_id, target_id),
-  check (requester_id <> target_id)
-);
-create index if not exists follow_requests_target_idx on public.follow_requests (target_id, created_at desc);
-
--- გამოწერა: ღია პროფილზე — მაშინვე, დახურულზე — თხოვნა
-create or replace function public.follow_user(p_target uuid)
-returns text language plpgsql security definer set search_path = public as $$
-begin
-  if not public.can_act() then raise exception 'ანგარიში დროებით შეზღუდულია'; end if;
-  if p_target = auth.uid() then raise exception 'საკუთარ თავს ვერ გამოიწერ'; end if;
-  if public.is_blocked(auth.uid(), p_target) then raise exception 'ამ ადამიანს ვერ გამოიწერ'; end if;
-  if exists (select 1 from follows where follower_id = auth.uid() and following_id = p_target) then return 'following'; end if;
-  if (select count(*) from follows where follower_id = auth.uid() and created_at > now() - interval '1 hour') >= 150 then
-    raise exception 'ძალიან ბევრი გამოწერა ცოტა ხანში — სცადე მოგვიანებით';
-  end if;
-  if public.is_private_profile(p_target) then
-    insert into follow_requests (requester_id, target_id) values (auth.uid(), p_target) on conflict do nothing;
-    if found then
-      insert into notifications (user_id, actor_id, type) values (p_target, auth.uid(), 'follow_request');
-    end if;
-    return 'requested';
-  end if;
-  insert into follows (follower_id, following_id) values (auth.uid(), p_target) on conflict do nothing;
-  return 'following';
-end $$;
-
-create or replace function public.unfollow_user(p_target uuid)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  delete from follows where follower_id = auth.uid() and following_id = p_target;
-  delete from follow_requests where requester_id = auth.uid() and target_id = p_target;
-end $$;
-
-create or replace function public.respond_follow_request(p_requester uuid, p_accept boolean)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  delete from follow_requests where requester_id = p_requester and target_id = auth.uid();
-  if not found then return; end if;
-  delete from notifications where user_id = auth.uid() and actor_id = p_requester and type = 'follow_request';
-  if p_accept and not public.is_blocked(auth.uid(), p_requester) then
-    insert into follows (follower_id, following_id) values (p_requester, auth.uid()) on conflict do nothing;
-    insert into notifications (user_id, actor_id, type) values (p_requester, auth.uid(), 'follow_accept');
-  end if;
-end $$;
-
--- პროფილის გახსნისას ყველა მოლოდინში მყოფი თხოვნა დასტურდება
-create or replace function public.on_profile_privacy()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if old.is_private and not new.is_private then
-    insert into follows (follower_id, following_id)
-    select requester_id, target_id from follow_requests where target_id = new.id
-    on conflict do nothing;
-    delete from follow_requests where target_id = new.id;
-  end if;
-  return new;
-end $$;
-drop trigger if exists profiles_privacy on public.profiles;
-create trigger profiles_privacy after update of is_private on public.profiles
-  for each row execute function public.on_profile_privacy();
-
 -- ---- გამოკითხვები
 create table if not exists public.polls (
   post_id uuid primary key references public.posts on delete cascade,
@@ -503,4 +433,77 @@ begin
   if p_metric is null or p_metric = 'level' then
     m := m || jsonb_build_object('level', (select public.level_of(coalesce(max(xp), 0)) from progress where user_id = p_user)); end if;
   return m;
+end $$;
+
+-- ქულის დარიცხვა: p_ref — ერთხელ თითო სამიზნეზე, p_cap — დღიური ლიმიტი ამ ტიპზე (თბილისის დროით)
+create or replace function public.award(p_user uuid, p_kind text, p_xp int, p_coins int, p_ref text default null, p_cap int default null)
+returns boolean language plpgsql security definer set search_path = public as $$
+declare v_old int; v_new int; v_lvl int;
+begin
+  if p_user is null then return false; end if;
+  if p_ref is not null and exists (select 1 from progress_events where user_id = p_user and kind = p_kind and ref = p_ref) then return false; end if;
+  if p_cap is not null and (select count(*) from progress_events where user_id = p_user and kind = p_kind
+                              and created_at >= public.tbilisi_day_start()) >= p_cap then return false; end if;
+  insert into progress (user_id) values (p_user) on conflict do nothing;
+  update progress set xp = xp + p_xp, coins = coins + p_coins, updated_at = now()
+   where user_id = p_user returning xp - p_xp, xp into v_old, v_new;
+  insert into progress_events (user_id, kind, xp, coins, ref) values (p_user, p_kind, p_xp, p_coins, p_ref);
+  v_lvl := public.level_of(v_new);
+  if v_lvl > public.level_of(v_old) then
+    perform public.award(p_user, 'level', 0, v_lvl * 5, v_lvl::text);
+    insert into notifications (user_id, type, data) values (p_user, 'level_up', jsonb_build_object('level', v_lvl, 'coins', v_lvl * 5));
+    perform public.check_badges(p_user, 'level');
+  end if;
+  return true;
+end $$;
+
+create or replace function public.spend_coins(p_user uuid, p_amount int, p_kind text, p_ref text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if p_amount <= 0 then return; end if;
+  update progress set coins = coins - p_amount, updated_at = now() where user_id = p_user and coins >= p_amount;
+  if not found then raise exception 'ბროწეული არ გყოფნის'; end if;
+  insert into progress_events (user_id, kind, xp, coins, ref) values (p_user, p_kind, 0, -p_amount, p_ref);
+end $$;
+
+create or replace function public.check_badges(p_user uuid, p_metric text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare m jsonb; b record;
+begin
+  if p_user is null then return; end if;
+  m := public.badge_metrics(p_user, p_metric);
+  for b in select * from badges x
+            where (p_metric is null or x.metric = p_metric)
+              and coalesce((m ->> x.metric)::int, 0) >= x.target
+              and not exists (select 1 from user_badges u where u.user_id = p_user and u.badge = x.key)
+            order by x.sort loop
+    insert into user_badges (user_id, badge) values (p_user, b.key) on conflict do nothing;
+    if found then
+      perform public.award(p_user, 'badge', 0, b.coins, b.key);
+      insert into notifications (user_id, type, data) values (p_user, 'achievement', jsonb_build_object('badge', b.key, 'coins', b.coins));
+    end if;
+  end loop;
+end $$;
+
+-- დღიური შესვლა: სერია, ბროწეული (5 → 15, ყოველ მე-7 დღეს +25), პირველად — მისასალმებელი 25
+create or replace function public.daily_checkin()
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare v progress; v_today date := public.tbilisi_today(); v_streak int; v_reward int; v_first boolean;
+begin
+  if auth.uid() is null then raise exception 'not signed in'; end if;
+  insert into progress (user_id) values (auth.uid()) on conflict do nothing;
+  select * into v from progress where user_id = auth.uid() for update;
+  if v.last_day = v_today or not public.can_act() then
+    return jsonb_build_object('claimed', false, 'streak', v.streak, 'coins', v.coins, 'xp', v.xp, 'level', public.level_of(v.xp));
+  end if;
+  v_first := v.last_day is null;
+  v_streak := case when v.last_day = v_today - 1 then v.streak + 1 else 1 end;
+  v_reward := 5 + 2 * least(v_streak - 1, 5) + case when v_streak % 7 = 0 then 25 else 0 end;
+  update progress set streak = v_streak, best_streak = greatest(best_streak, v_streak), last_day = v_today where user_id = auth.uid();
+  perform public.award(auth.uid(), 'checkin', 10, v_reward, v_today::text);
+  if v_first then perform public.award(auth.uid(), 'welcome', 0, 25, 'welcome'); end if;
+  perform public.check_badges(auth.uid(), case when v_first then null else 'streak' end);
+  select * into v from progress where user_id = auth.uid();
+  return jsonb_build_object('claimed', true, 'first', v_first, 'streak', v_streak, 'reward', v_reward + case when v_first then 25 else 0 end,
+                            'coins', v.coins, 'xp', v.xp, 'level', public.level_of(v.xp));
 end $$;

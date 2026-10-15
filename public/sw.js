@@ -1,5 +1,5 @@
 // ეზო — სერვის-ვორკერი: Push შეტყობინებები, offline რეჟიმი, შრიფტის და ფოტოების ქეში
-const CACHE = 'ezo-v4'
+const CACHE = 'ezo-v5'
 const FONTS = 'ezo-fonts-v1'
 const IMAGES = 'ezo-img-v1'
 const KEEP = [CACHE, FONTS, IMAGES]

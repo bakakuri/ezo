@@ -1324,3 +1324,35 @@ a.level-chip:active { transform: scale(0.94); }
 .memory-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 .memory-actions .btn { gap: 6px; }
 .chat-bar textarea { field-sizing: content; }
+
+/* ---------------- ეტაპი F: დაყენება, ტრაფიკის დაზოგვა ---------------- */
+.install-banner {
+  position: fixed; z-index: 70; left: 12px; right: 12px; bottom: calc(var(--nav-h) + var(--safe-b) + 20px);
+  display: flex; align-items: center; gap: 12px; max-width: 520px; margin: 0 auto; padding: 12px 10px 12px 12px;
+  border-radius: 20px; background: var(--surface-strong); border: 1px solid var(--glass-line); box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(18px) saturate(1.6); -webkit-backdrop-filter: blur(18px) saturate(1.6);
+  animation: install-in 0.5s var(--spring) backwards 0.6s;
+}
+@keyframes install-in { from { transform: translateY(24px); opacity: 0; } }
+.install-banner img { flex: none; width: 44px; height: 44px; border-radius: 12px; box-shadow: 0 2px 8px rgba(163, 18, 58, 0.25); }
+.install-banner .grow { min-width: 0; }
+.install-banner b { display: block; font-size: var(--t-sm); line-height: 1.3; }
+.install-banner p { margin-top: 2px; font-size: var(--t-xs); line-height: 1.4; color: var(--ink-2); }
+.install-banner .btn { flex: none; }
+.install-x { flex: none; display: grid; place-items: center; width: 32px; height: 32px; margin-left: -4px; border-radius: 50%; color: var(--ink-3); }
+.install-x:hover { background: var(--bg-2); color: var(--ink); }
+.demo-banner ~ .app .install-banner { bottom: calc(var(--nav-h) + var(--safe-b) + 64px); }
+@media (min-width: 1040px) { .install-banner { left: auto; right: 24px; bottom: 24px; margin: 0; width: 400px; } }
+@media (prefers-reduced-motion: reduce) { .install-banner { animation: none; } }
+.ios-steps { margin: 4px 0 14px; padding: 0 0 0 22px; display: grid; gap: 12px; font-size: var(--t-md); line-height: 1.5; }
+.ios-steps li::marker { font-weight: 800; color: var(--accent); }
+.ios-ico { display: inline-grid; place-items: center; width: 28px; height: 28px; margin-left: 4px; vertical-align: -8px; border-radius: 8px; background: var(--bg-2); color: #0a84ff; }
+.sheet-body > .small.muted { margin-bottom: 16px; line-height: 1.5; }
+.saver-chips { padding-top: 0; padding-bottom: 6px; }
+.setting-row.saver-row:hover, .setting-row.saver-row:active { background: none; box-shadow: none; transform: none; }
+
+/* ---------------- ეტაპი G: ბოტებისგან დაცვა ---------------- */
+.captcha { display: grid; justify-items: center; gap: 6px; }
+.captcha > div:empty { display: none; }
+.captcha small { font-size: var(--t-xs); color: var(--ink-2); text-align: center; line-height: 1.45; }
+.captcha small.err { color: var(--accent); }

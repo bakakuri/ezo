@@ -1,8 +1,8 @@
-import { DEMO } from './supabase.js'
-import { api as real } from './api.supabase.js'
-import { api as demo } from './api.demo.js'
+// API: ნამდვილი (Supabase) ან დემო. რომელი — აწყობისას წყდება (vite.config.js → ezo-api-impl),
+// ასე ნამდვილ საიტზე დემოს კოდი, მონაცემები და თამაშის ბოტები საერთოდ არ ჩამოიტვირთება.
+import { api as impl } from 'ezo-api-impl'
 import { setErrorSender } from './errors.js'
 
-export const api = DEMO ? demo : real
+export const api = impl
 
 setErrorSender((e) => api.logError(e))

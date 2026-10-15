@@ -3,6 +3,7 @@ import { Icon, Mark } from '../components/Icon.jsx'
 import { api } from '../lib/api.js'
 import { Link, useLocation } from '../lib/router.jsx'
 import { InviteBanner } from '../components/Growth.jsx'
+import { useCaptcha, CaptchaBox } from '../components/Captcha.jsx'
 
 // სტუმრის მთავარი გვერდი: რა არის ეზო + რეგისტრაცია/შესვლა.
 // დესკტოპზე ფორმა მარჯვნივ ჩანს, ტელეფონზე — ღილაკი ფორმამდე ჩამოიყვანს.
@@ -112,6 +113,7 @@ function Balconies() {
 }
 
 function AuthForm({ mode, setMode }) {
+  const captcha = useCaptcha()
   const [form, setForm] = useState({ name: '', email: '', password: '' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState(null)
@@ -123,19 +125,21 @@ function AuthForm({ mode, setMode }) {
     setMsg(null)
     setBusy(true)
     try {
+      const token = await captcha.get()
       if (mode === 'signup') {
-        const { needsConfirm } = await api.signUp(form.email.trim(), form.password, form.name.trim())
+        const { needsConfirm } = await api.signUp(form.email.trim(), form.password, form.name.trim(), token)
         if (needsConfirm) setMsg({ ok: true, text: `დადასტურების ბმული გამოგზავნილია ${form.email}-ზე. გახსენი წერილი და დაბრუნდი.` })
       } else if (mode === 'signin') {
-        await api.signIn(form.email.trim(), form.password)
+        await api.signIn(form.email.trim(), form.password, token)
       } else {
-        await api.resetPassword(form.email.trim())
+        await api.resetPassword(form.email.trim(), token)
         setMsg({ ok: true, text: 'პაროლის აღდგენის ბმული გამოგზავნილია. ნახე ელფოსტა.' })
       }
     } catch (er) {
       setMsg({ ok: false, text: er.message })
     } finally {
       setBusy(false)
+      captcha.reset()
     }
   }
 
@@ -156,6 +160,7 @@ function AuthForm({ mode, setMode }) {
         </label>
       )}
       {msg && <div className={`notice${msg.ok ? '' : ' err'}`} role={msg.ok ? 'status' : 'alert'}>{msg.text}</div>}
+      <CaptchaBox captcha={captcha} />
       <button className="btn btn-accent lg block" disabled={busy}>
         {busy ? 'ერთი წამით…' : mode === 'signup' ? 'ანგარიშის შექმნა' : mode === 'signin' ? 'შესვლა' : 'ბმულის გაგზავნა'}
       </button>
