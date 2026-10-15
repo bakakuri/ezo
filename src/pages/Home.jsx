@@ -11,6 +11,7 @@ import { Link } from '../lib/router.jsx'
 import { Icon } from '../components/Icon.jsx'
 import { banText } from '../lib/format.js'
 import { pushStatus, enablePush } from '../lib/push.js'
+import { SuggestStrip } from '../components/Suggest.jsx'
 
 const readTab = () => { try { return localStorage.getItem('ezo.feed') || 'foryou' } catch { return 'foryou' } }
 
@@ -105,6 +106,7 @@ export default function Home() {
         </div>
       </div>
       {stale && !navigator.onLine && <p className="stale-note">ოფლაინ ხარ — ნაჩვენებია ბოლოს ნანახი ფიდი</p>}
+      {posts !== null && posts.length < 3 && <SuggestStrip title="ვის გამოიწერო" />}
       {posts === null && <PostSkeleton n={3} />}
       {error && <Empty icon="refresh" title="ფიდი ვერ ჩაიტვირთა" text={error} action={<button className="btn btn-outline" onClick={() => load(tab)}>თავიდან ცდა</button>} />}
       {posts?.length === 0 && !error && (
@@ -115,40 +117,12 @@ export default function Home() {
       {posts?.map((p, i) => (
         <div key={p.id}>
           <PostCard post={p} onDeleted={(id) => setPosts((cur) => cur.filter((x) => x.id !== id))} />
-          {i === 2 && <SuggestedStrip />}
+          {i === 2 && <SuggestStrip />}
         </div>
       ))}
       <div ref={sentinel} style={{ height: 1 }} />
       {loadingMore && <div className="center pad"><div className="spinner" /></div>}
     </>
-  )
-}
-
-function SuggestedStrip() {
-  const [people, setPeople] = useState([])
-  const [done, setDone] = useState({})
-  useEffect(() => { api.suggested().then(setPeople).catch(() => {}) }, [])
-  if (!people.length) return null
-  return (
-    <section style={{ borderBottom: '1px solid var(--line)', paddingBottom: 14 }} aria-label="შეიძლება იცნობდე">
-      <div className="section-title"><h2>შეიძლება იცნობდე</h2><Link to="/explore">ყველა</Link></div>
-      <div className="chips" style={{ gap: 10 }}>
-        {people.map((p) => (
-          <div key={p.id} style={{ width: 150, flexShrink: 0, border: '1px solid var(--line)', borderRadius: 16, padding: '16px 12px 12px', textAlign: 'center' }} className="vstack">
-            <Link to={`/u/${p.username}`} className="vstack" style={{ alignItems: 'center', gap: 8 }}>
-              <Avatar user={p} size={64} />
-              <b className="ellipsis" style={{ maxWidth: '100%' }}>{p.full_name || p.username}</b>
-              <span className="xs faint ellipsis" style={{ maxWidth: '100%', marginTop: -8 }}>{p.school || p.city || `@${p.username}`}</span>
-            </Link>
-            <button className={`btn sm block ${done[p.id] ? 'btn-outline' : 'btn-primary'}`} onClick={async () => {
-              const on = !done[p.id]
-              setDone((d) => ({ ...d, [p.id]: on }))
-              await api.follow(p.id, on)
-            }}>{done[p.id] ? 'გამოწერილია' : 'გამოწერა'}</button>
-          </div>
-        ))}
-      </div>
-    </section>
   )
 }
 

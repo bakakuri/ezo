@@ -7,7 +7,7 @@ import { isSchemaError, reportApiError } from './errors.js'
 
 // თავის თავზე მიბმული კავშირები (ციტატა, პასუხი): PostgREST-ში მხოლოდ სვეტით (quote:quote_id) — კავშირის სახელს ვერ პოულობს,
 // posts!quote_id კი საპირისპირო მიმართულებას (სიას) აბრუნებს
-const PERSON = 'id,username,full_name,avatar_url,last_seen'
+const PERSON = 'id,username,full_name,avatar_url,last_seen,verified'
 const POST = `*, author:profiles!posts_author_id_fkey(${PERSON}),
   quote:quote_id(id,body,media,created_at,author:profiles!posts_author_id_fkey(${PERSON})),
   group:groups!posts_group_id_fkey(id,slug,name,privacy), poll:polls(*)`
@@ -266,8 +266,18 @@ export const api = {
     else if (tab !== 'media') q = q.eq('kind', 'post')
     let rows = ok(await q)
     if (tab === 'media') rows = rows.filter((p) => p.media?.length)
+    // მიმაგრებული პოსტი — პირველი
+    if (tab === 'posts') {
+      const prof = ok(await sb.from('profiles').select('pinned_post_id').eq('id', userId).maybeSingle())
+      const pid = prof?.pinned_post_id
+      if (pid) {
+        const pinned = rows.find((p) => p.id === pid) || ok(await sb.from('posts').select(POST).eq('id', pid).maybeSingle())
+        if (pinned) rows = [{ ...pinned, pinned: true }, ...rows.filter((p) => p.id !== pid)]
+      }
+    }
     return withLikes(rows)
   },
+  async pinPost(id) { ok(await sb.rpc('pin_post', { p_post: id })) },
 
   // ---- ადამიანები
   async relation(id) {
@@ -309,12 +319,18 @@ export const api = {
     const rows = ok(await sb.from('follows').select(`p:profiles!follows_following_id_fkey(${PERSON},bio)`).eq('follower_id', id).limit(200))
     return rows.map((r) => r.p)
   },
-  async search(q) {
-    const term = q.replace(/[%,()]/g, ' ').trim()
-    if (!term) return []
-    return ok(await sb.from('profiles').select('*').eq('onboarded', true)
-      .or(`username.ilike.%${term}%,full_name.ilike.%${term}%`).limit(30))
+  // ძებნა ყველაფერზე: ქართულად ან ლათინურად („giorgi“ = „გიორგი“), უმნიშვნელო შეცდომითაც
+  async searchAll(q) {
+    const r = ok(await sb.rpc('search_all', { p_q: q, p_limit: 20 }))
+    let posts = []
+    if (r.posts?.length) {
+      const rows = ok(await sb.from('posts').select(POST).in('id', r.posts))
+      const order = new Map(r.posts.map((id, i) => [id, i]))
+      posts = await withLikes(rows.sort((a, b) => order.get(a.id) - order.get(b.id)))
+    }
+    return { ...r, posts }
   },
+  async search(q) { return (await this.searchAll(q)).people },
   async classmates({ school, year, city }) {
     let q = sb.from('profiles').select('*').eq('onboarded', true).neq('id', uid()).limit(60)
     if (school) q = q.ilike('school', `%${school.trim()}%`)
@@ -322,9 +338,19 @@ export const api = {
     if (city) q = q.ilike('city', `%${city.trim()}%`)
     return ok(await q)
   },
-  async suggested() {
-    return ok(await sb.rpc('suggested_people', { p_limit: 12 }))
+  // ვის გამოიწერო — მიზეზით: follows_you | invite | classmate | mutual (+via) | school | city | new | popular
+  async suggested(limit = 12) {
+    return ok(await sb.rpc('who_to_follow', { p_limit: limit }))
   },
+  async dismissSuggestion(id) { ok(await sb.rpc('dismiss_suggestion', { p_user: id })) },
+
+  // ---- მონახაზები
+  async drafts() { return ok(await sb.from('drafts').select('*').order('updated_at', { ascending: false })) },
+  async saveDraft({ id = null, body = '', poll = null, group_id = null }) {
+    if (id) return ok(await sb.from('drafts').update({ body, poll, group_id }).eq('id', id).select().single())
+    return ok(await sb.from('drafts').insert({ body, poll, group_id }).select().single())
+  },
+  async deleteDraft(id) { ok(await sb.from('drafts').delete().eq('id', id)) },
 
   // ---- სთორიები
   async stories() {
@@ -414,7 +440,12 @@ export const api = {
   },
   async conversation(id) {
     const all = ok(await sb.rpc('my_conversations'))
-    return all.find((c) => c.id === id) || null
+    const c = all.find((x) => x.id === id) || null
+    if (c?.other?.id) {
+      const v = ok(await sb.from('profiles').select('verified').eq('id', c.other.id).maybeSingle())
+      c.other = { ...c.other, verified: Boolean(v?.verified) }
+    }
+    return c
   },
   async messages(convId) {
     const rows = ok(await sb.from('messages').select(MSG).eq('conversation_id', convId).order('created_at', { ascending: false }).limit(150))
@@ -887,6 +918,14 @@ export const api = {
   },
   async adminBan(userId, days = null, note = null) { ok(await sb.rpc('admin_ban', { p_user: userId, p_days: days, p_note: note })) },
   async adminUnban(userId) { ok(await sb.rpc('admin_unban', { p_user: userId })) },
+  async adminSetVerified(userId, on) { ok(await sb.rpc('admin_set_verified', { p_user: userId, p_on: on })) },
+  async adminAnalytics(days = 30) { return ok(await sb.rpc('admin_analytics', { p_days: days })) },
+
+  // ---- შეტყობინებების პარამეტრები (Push): რომელი კატეგორია მოვიდეს და ჩუმი საათები. სერვერი ამოწმებს
+  async notificationPrefs() { return ok(await sb.from('notification_prefs').select('*').eq('user_id', uid()).maybeSingle()) },
+  async saveNotificationPrefs(patch) {
+    return ok(await sb.from('notification_prefs').upsert({ user_id: uid(), ...patch, updated_at: new Date().toISOString() }).select().single())
+  },
 
   // შეცდომების ჟურნალი (ჩაწერისას შეცდომა არ ისვრის — ჟურნალი აპს არ უნდა შეეხოს)
   async logError(e) {

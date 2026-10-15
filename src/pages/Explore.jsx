@@ -5,12 +5,18 @@ import { api } from '../lib/api.js'
 import { useAuth } from '../lib/auth.jsx'
 import { Link, useLocation } from '../lib/router.jsx'
 import { count } from '../lib/format.js'
+import { PostCard } from '../components/PostCard.jsx'
+import { SuggestList } from '../components/Suggest.jsx'
+import { priceText } from '../lib/market.js'
+
+const RESULT_TABS = [['all', 'ყველა'], ['people', 'ხალხი'], ['posts', 'პოსტები'], ['groups', 'ჯგუფები'], ['listings', 'ბაზარი']]
 
 export default function Explore() {
   const { query } = useLocation()
   const [q, setQ] = useState(query.get('q') || '')
-  const [mode, setMode] = useState(query.get('tab') === 'classmates' ? 'classmates' : 'grid')
-  const [people, setPeople] = useState([])
+  const [mode, setMode] = useState(['classmates', 'people'].includes(query.get('tab')) ? query.get('tab') : 'grid')
+  const [res, setRes] = useState(null)
+  const [rtab, setRtab] = useState('all')
   const [grid, setGrid] = useState(null)
 
   const [tags, setTags] = useState([])
@@ -19,9 +25,10 @@ export default function Explore() {
     api.trendingTags().then(setTags).catch(() => {})
   }, [])
   useEffect(() => {
-    if (!q.trim()) { setPeople([]); return }
-    const t = setTimeout(() => api.search(q.replace(/^[#@]/, '')).then(setPeople).catch(() => {}), 250)
-    return () => clearTimeout(t)
+    if (!q.trim()) { setRes(null); return }
+    let live = true
+    const t = setTimeout(() => api.searchAll(q.trim()).then((r) => live && setRes({ q: q.trim(), ...r })).catch(() => live && setRes({ q: q.trim(), people: [], posts: [], tags: [], groups: [], listings: [] })), 280)
+    return () => { live = false; clearTimeout(t) }
   }, [q])
 
   const searching = q.trim().length > 0
@@ -30,12 +37,13 @@ export default function Explore() {
       <div className="explore-search">
         <div className="searchbox">
           <Icon name="search" size={19} />
-          <input className="input" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="ძებნა: სახელი ან @username" aria-label="ძებნა" />
+          <input className="input" type="search" value={q} onChange={(e) => { setQ(e.target.value); setRtab('all') }} placeholder="ხალხი, პოსტები, ჯგუფები, ბაზარი" aria-label="ძებნა" enterKeyHint="search" />
         </div>
       </div>
       {!searching && (
         <div className="chips" style={{ padding: '6px 16px 4px' }}>
           <button className={`chip${mode === 'grid' ? ' on' : ''}`} onClick={() => setMode('grid')}><Icon name="sparkle" size={16} />აღმოაჩინე</button>
+          <button className={`chip${mode === 'people' ? ' on' : ''}`} onClick={() => setMode('people')}><Icon name="userPlus" size={16} />ვის გამოიწერო</button>
           <button className={`chip${mode === 'classmates' ? ' on' : ''}`} onClick={() => setMode('classmates')}><Icon name="school" size={16} />კლასელები</button>
           <Link className="chip" to="/groups"><Icon name="users" size={16} />ჯგუფები</Link>
           <Link className="chip" to="/market"><Icon name="bag" size={16} />ბაზარი</Link>
@@ -45,17 +53,8 @@ export default function Explore() {
           <Link className="chip" to="/rewards"><Icon name="medal" size={16} />ჯილდოები</Link>
         </div>
       )}
-      {searching && q.trim().startsWith('#') && q.trim().length > 2 && (
-        <Link to={`/tag/${encodeURIComponent(q.trim().slice(1).toLowerCase())}`} className="person-row">
-          <span className="group-thumb" style={{ width: 46, height: 46, borderRadius: 23, background: 'var(--bg-2)', color: 'var(--ink)' }}>#</span>
-          <div className="who"><b>{q.trim()}</b><small>პოსტები ამ თეგით</small></div>
-        </Link>
-      )}
-      {searching && (
-        people.length
-          ? people.map((p) => <PersonRow key={p.id} user={p} sub={[p.username && `@${p.username}`, p.city].filter(Boolean).join(', ')} />)
-          : <p className="pad small faint">„{q}“ — ვერავინ ვიპოვე</p>
-      )}
+      {searching && <SearchResults res={res} q={q.trim()} tab={rtab} setTab={setRtab} />}
+      {!searching && mode === 'people' && <SuggestList limit={20} />}
       {!searching && mode === 'classmates' && <Classmates />}
       {!searching && mode === 'grid' && tags.length > 0 && (
         <>
@@ -118,5 +117,71 @@ function Classmates() {
         } />
       ))}
     </section>
+  )
+}
+
+// ძებნის შედეგები: ქართულად ან ლათინურად („giorgi“ = „გიორგი“)
+function SearchResults({ res, q, tab, setTab }) {
+  if (!res || res.q !== q) return <div className="center pad"><div className="spinner" /></div>
+  const total = res.people.length + res.posts.length + res.tags.length + res.groups.length + res.listings.length
+  const tagLink = q.startsWith('#') && q.length > 2 ? q.slice(1).toLowerCase() : null
+  if (!total && !tagLink) {
+    return <Empty icon="search" title={`„${q}“ — ვერაფერი ვიპოვე`} text="სცადე სხვაგვარად: ქართულად ან ლათინურად, ან სიტყვის ნაწილით." />
+  }
+  const show = (k) => tab === 'all' || tab === k
+  const cut = (list, n) => (tab === 'all' ? list.slice(0, n) : list)
+  const more = (k, list, n) => tab === 'all' && list.length > n && <button className="search-more" onClick={() => setTab(k)}>ყველა ({list.length})</button>
+  return (
+    <div className="search-results">
+      <div className="chips" role="tablist" style={{ padding: '6px 16px 2px' }}>
+        {RESULT_TABS.filter(([k]) => k === 'all' || res[k]?.length).map(([k, l]) => (
+          <button key={k} role="tab" aria-selected={tab === k} className={`chip${tab === k ? ' on' : ''}`} onClick={() => setTab(k)}>{l}</button>
+        ))}
+      </div>
+      {tab === 'all' && (tagLink || res.tags.length > 0) && (
+        <nav className="trend" aria-label="თეგები" style={{ paddingTop: 8 }}>
+          {tagLink && !res.tags.some((t) => t.tag === tagLink) && <Link to={`/tag/${encodeURIComponent(tagLink)}`}>#{tagLink}</Link>}
+          {res.tags.map((t) => <Link key={t.tag} to={`/tag/${encodeURIComponent(t.tag)}`}>#{t.tag}<small>{t.posts}</small></Link>)}
+        </nav>
+      )}
+      {show('people') && res.people.length > 0 && (
+        <section aria-label="ხალხი">
+          {tab === 'all' && <div className="section-title"><h2>ხალხი</h2></div>}
+          {cut(res.people, 4).map((p) => <PersonRow key={p.id} user={p} sub={[`@${p.username}`, p.city].filter(Boolean).join(', ')} />)}
+          {more('people', res.people, 4)}
+        </section>
+      )}
+      {show('groups') && res.groups.length > 0 && (
+        <section aria-label="ჯგუფები">
+          {tab === 'all' && <div className="section-title"><h2>ჯგუფები</h2></div>}
+          {cut(res.groups, 3).map((g) => (
+            <Link key={g.id} to={`/groups/${g.slug}`} className="person-row">
+              {g.cover_url ? <img className="search-thumb" src={g.cover_url} alt="" loading="lazy" /> : <span className="search-thumb"><Icon name="users" size={20} /></span>}
+              <div className="who"><b>{g.name}</b><small>{count(g.members_count) || 0} წევრი{g.privacy === 'private' ? ', დახურული' : ''}</small></div>
+            </Link>
+          ))}
+          {more('groups', res.groups, 3)}
+        </section>
+      )}
+      {show('listings') && res.listings.length > 0 && (
+        <section aria-label="ბაზარი">
+          {tab === 'all' && <div className="section-title"><h2>ბაზარი</h2></div>}
+          {cut(res.listings, 3).map((l) => (
+            <Link key={l.id} to={`/market/${l.id}`} className="person-row">
+              {l.photo ? <img className="search-thumb sq" src={l.photo} alt="" loading="lazy" /> : <span className="search-thumb sq"><Icon name="bag" size={20} /></span>}
+              <div className="who"><b>{l.title}</b><small>{[priceText(l.price, l.currency), l.city].filter(Boolean).join(', ')}</small></div>
+            </Link>
+          ))}
+          {more('listings', res.listings, 3)}
+        </section>
+      )}
+      {show('posts') && res.posts.length > 0 && (
+        <section aria-label="პოსტები">
+          {tab === 'all' && <div className="section-title"><h2>პოსტები</h2></div>}
+          {cut(res.posts, 5).map((p) => <PostCard key={p.id} post={p} />)}
+          {more('posts', res.posts, 5)}
+        </section>
+      )}
+    </div>
   )
 }

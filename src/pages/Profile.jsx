@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Avatar, Empty, Loader, PostSkeleton, Sheet, TopBar, PersonRow } from '../components/ui.jsx'
+import { Avatar, Empty, Loader, PostSkeleton, Sheet, TopBar, PersonRow, Verified } from '../components/ui.jsx'
 import { Icon } from '../components/Icon.jsx'
 import { PostCard } from '../components/PostCard.jsx'
 import { GiftArt, GiftSheet, giftName } from '../components/Gifts.jsx'
@@ -48,11 +48,17 @@ export default function Profile({ username }) {
     }).catch(() => setP(null))
   }, [username, me?.id])
 
+  const [pinTick, setPinTick] = useState(0)
+  useEffect(() => {
+    const on = () => setPinTick((n) => n + 1)
+    window.addEventListener('ezo:pinned', on)
+    return () => window.removeEventListener('ezo:pinned', on)
+  }, [])
   useEffect(() => {
     if (!p) return
     setPosts(null)
     api.userPosts(p.id, tab).then(setPosts).catch(() => setPosts([]))
-  }, [p?.id, tab, rel.following]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [p?.id, tab, rel.following, pinTick]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (p === undefined) return <><TopBar title="" backTo="/" /><Loader /></>
   if (p === null) return <><TopBar title="პროფილი" backTo="/" /><Empty icon="user" title="ეს პროფილი არ არსებობს" text={`@${username} ვერ მოიძებნა.`} /></>
@@ -98,7 +104,7 @@ export default function Profile({ username }) {
       <section className="profile-head">
         <div className="profile-top">
           <div className="names">
-            <h1>{p.full_name || p.username}{p.is_private && <Icon name="lock" size={20} className="name-lock" title="დახურული ანგარიში" />}</h1>
+            <h1>{p.full_name || p.username}<Verified user={p} size={22} />{p.is_private && <Icon name="lock" size={20} className="name-lock" title="დახურული ანგარიში" />}</h1>
             <div className="handle small">@{p.username}{!isMe && rel.followedBy && <span className="tag-dating" style={{ marginLeft: 8, background: 'var(--bg-2)', color: 'var(--ink-2)' }}>გამოგიწერა</span>}</div>
             {pp && <LevelChip xp={pp.xp} streak={pp.streak} to={isMe ? '/rewards' : undefined} />}
           </div>
@@ -234,6 +240,13 @@ export default function Profile({ username }) {
             <button onClick={() => setSheet('share')}><Icon name="qr" />QR კოდი და გაზიარება</button>
             <button onClick={toggleClose}><Icon name="star" fill={rel.closeFriend} />{rel.closeFriend ? 'ახლო მეგობრებიდან ამოღება' : 'ახლო მეგობრებში დამატება'}</button>
             <button onClick={() => setSheet('report')}><Icon name="flag" />დარეპორტება</button>
+            {me?.role === 'admin' && (
+              <button onClick={async () => {
+                setSheet(null)
+                const on = !p.verified
+                try { await api.adminSetVerified(p.id, on); setP((x) => ({ ...x, verified: on })); toast(on ? 'ნიშანი მიენიჭა' : 'ნიშანი მოიხსნა') } catch (e) { toast(e.message, 'error') }
+              }}><Icon name="check" />{p.verified ? 'დადასტურების ნიშნის მოხსნა' : 'დადასტურების ნიშნის მინიჭება'}</button>
+            )}
             {['moderator', 'admin'].includes(me?.role) && p.role === 'user' && (p.banned_until
               ? <button onClick={async () => { setSheet(null); await api.adminUnban(p.id); setP((x) => ({ ...x, banned_until: null })); toast('ბლოკი მოიხსნა') }}><Icon name="check" />ბლოკის მოხსნა</button>
               : <button onClick={() => setSheet('ban')}><Icon name="block" />ანგარიშის შეზღუდვა</button>)}

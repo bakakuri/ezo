@@ -2,6 +2,8 @@
 // vercel.json ბოტების მოთხოვნებს აქ გადმოამისამართებს; ადამიანები ჩვეულებრივ აპს ხედავენ.
 // საჭირო ცვლადები (Vercel → Settings → Environment Variables): VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
 // მონაცემები მოდის SQL ფუნქციიდან og_preview — მხოლოდ საჯარო შიგთავსი.
+import { rpc, originOf } from './_rpc.js'
+
 const ROUTES = [
   [/^\/p\/([0-9a-f-]{36})$/i, 'p'],
   [/^\/u\/([a-z0-9_.]{3,24})$/, 'u'],
@@ -12,23 +14,7 @@ const ROUTES = [
 ]
 const esc = (s = '') => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
-async function preview(kind, key) {
-  const base = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL
-  const anon = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY
-  if (!base || !anon) return null
-  try {
-    const r = await fetch(`${base}/rest/v1/rpc/og_preview`, {
-      method: 'POST',
-      // ახალი publishable გასაღები (sb_publishable_…) JWT არაა — მხოლოდ apikey-ში იგზავნება
-      headers: { apikey: anon, ...(anon.startsWith('eyJ') ? { Authorization: `Bearer ${anon}` } : {}), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ p_kind: kind, p_key: key }),
-      signal: AbortSignal.timeout(3500),
-    })
-    return r.ok ? await r.json() : null
-  } catch {
-    return null
-  }
-}
+const preview = (kind, key) => rpc('og_preview', { p_kind: kind, p_key: key })
 
 export function render({ origin, path, data }) {
   const title = data?.title || 'ეზო — ქართული სოციალური ქსელი'
@@ -55,8 +41,7 @@ export function render({ origin, path, data }) {
 }
 
 export default async function handler(req, res) {
-  const host = req.headers['x-forwarded-host'] || req.headers.host
-  const origin = `https://${host}`
+  const origin = originOf(req)
   const raw = new URL(req.url, origin).searchParams.get('path') || '/'
   const path = raw.startsWith('/') ? raw.split('?')[0] : '/'
   let data = null

@@ -10,7 +10,8 @@
     "test": "node --test tests/*.test.mjs",
     "build:functions": "node scripts/build-functions.mjs",
     "test:sql": "bash scripts/sql-tests.sh",
-    "test:real": "bash scripts/real-stack/run.sh"
+    "test:real": "bash scripts/real-stack/run.sh",
+    "build:emails": "node scripts/emails/build.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",

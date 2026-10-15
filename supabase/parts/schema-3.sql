@@ -1,114 +1,5 @@
 -- ეზო — სქემის ნაწილი 3/8. გაუშვი 2-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-create or replace function public.suggested_people(p_limit int default 12)
-returns setof public.profiles language sql stable security definer set search_path = public as $$
-  with me as (select * from profiles where id = auth.uid())
-  select p.* from profiles p cross join me
-  where p.id <> me.id and p.onboarded and (p.banned_until is null or p.banned_until < now())
-    and p.id not in (select following_id from follows where follower_id = me.id)
-    and not public.is_blocked(me.id, p.id)
-  order by
-    (me.school <> '' and lower(p.school) = lower(me.school)) desc,
-    (me.city <> '' and lower(p.city) = lower(me.city)) desc,
-    (select count(*) from follows f1 join follows f2 on f2.follower_id = f1.following_id
-      where f1.follower_id = me.id and f2.following_id = p.id) desc,
-    p.followers_count desc
-  limit p_limit;
-$$;
-
--- ---------------------------------------------------------------------
--- დახურული პროფილი და „ახლო მეგობრები“ — ხილვადობის დამხმარე ფუნქციები
--- ---------------------------------------------------------------------
-alter table public.profiles add column if not exists is_private boolean not null default false;
-
-create or replace function public.is_private_profile(p_id uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select coalesce((select is_private from profiles where id = p_id), false);
-$$;
-
--- ხედავს თუ არა მიმდინარე მომხმარებელი ავტორის პოსტებს/სთორიებს
-create or replace function public.can_see_author(p_author uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select p_author = auth.uid()
-      or not public.is_private_profile(p_author)
-      or exists (select 1 from follows where follower_id = auth.uid() and following_id = p_author)
-      or public.is_staff();
-$$;
-
-create or replace function public.story_audience_ok(p_author uuid, p_audience text)
-returns boolean language sql stable security definer set search_path = public as $$
-  select p_audience = 'all' or p_author = auth.uid()
-      or exists (select 1 from close_friends where owner_id = p_author and friend_id = auth.uid());
-$$;
-
--- ---------------------------------------------------------------------
--- Row Level Security
--- ---------------------------------------------------------------------
-alter table public.profiles enable row level security;
-alter table public.blocks enable row level security;
-alter table public.reports enable row level security;
-alter table public.follows enable row level security;
-alter table public.posts enable row level security;
-alter table public.likes enable row level security;
-alter table public.stories enable row level security;
-alter table public.story_views enable row level security;
-alter table public.profile_visits enable row level security;
-alter table public.gifts enable row level security;
-alter table public.notifications enable row level security;
-alter table public.conversations enable row level security;
-alter table public.conversation_members enable row level security;
-alter table public.messages enable row level security;
-alter table public.dating_profiles enable row level security;
-alter table public.swipes enable row level security;
-alter table public.matches enable row level security;
-alter table public.games enable row level security;
-alter table public.game_stats enable row level security;
-
-do $$ declare r record; begin
-  for r in select policyname, tablename from pg_policies where schemaname = 'public' loop
-    execute format('drop policy if exists %I on public.%I', r.policyname, r.tablename);
-  end loop;
-end $$;
-
-create policy "profiles read" on public.profiles for select to authenticated using (true);
-create policy "profiles update own" on public.profiles for update to authenticated using (id = auth.uid()) with check (id = auth.uid());
-
-create policy "blocks own" on public.blocks for all to authenticated using (blocker_id = auth.uid()) with check (blocker_id = auth.uid());
-create policy "reports insert" on public.reports for insert to authenticated with check (reporter_id = auth.uid());
-
-create policy "follows read" on public.follows for select to authenticated using (true);
-create policy "follows insert own" on public.follows for insert to authenticated
-  with check (follower_id = auth.uid() and not public.is_blocked(follower_id, following_id) and not public.is_private_profile(following_id));
-create policy "follows delete own" on public.follows for delete to authenticated using (follower_id = auth.uid());
-
-create policy "posts read" on public.posts for select to authenticated
-  using (not public.is_blocked(auth.uid(), author_id) and (not hidden or author_id = auth.uid() or public.is_staff()));
-create policy "posts insert own" on public.posts for insert to authenticated with check (author_id = auth.uid() and public.can_act());
-create policy "posts update own" on public.posts for update to authenticated using (author_id = auth.uid());
-create policy "posts delete own" on public.posts for delete to authenticated using (author_id = auth.uid());
-
-create policy "likes read" on public.likes for select to authenticated using (true);
-create policy "likes insert own" on public.likes for insert to authenticated with check (user_id = auth.uid());
-create policy "likes delete own" on public.likes for delete to authenticated using (user_id = auth.uid());
-
-create policy "stories read active" on public.stories for select to authenticated
-  using ((expires_at > now() or author_id = auth.uid()) and not public.is_blocked(auth.uid(), author_id)
-         and public.can_see_author(author_id) and public.story_audience_ok(author_id, audience));
-create policy "stories insert own" on public.stories for insert to authenticated with check (author_id = auth.uid() and public.can_act());
-create policy "stories delete own" on public.stories for delete to authenticated using (author_id = auth.uid());
-
-create policy "story views insert" on public.story_views for insert to authenticated with check (viewer_id = auth.uid());
-create policy "story views read" on public.story_views for select to authenticated using (
-  viewer_id = auth.uid() or exists (select 1 from public.stories s where s.id = story_id and s.author_id = auth.uid()));
-
-create policy "visits owner reads" on public.profile_visits for select to authenticated using (profile_id = auth.uid());
-
-create policy "gifts read" on public.gifts for select to authenticated using (true);
-create policy "gifts send" on public.gifts for insert to authenticated with check (from_id = auth.uid() and public.can_act());
-
-create policy "notifications own" on public.notifications for select to authenticated using (user_id = auth.uid());
-create policy "notifications mark read" on public.notifications for update to authenticated using (user_id = auth.uid());
-
 create policy "conversations members" on public.conversations for select to authenticated using (public.is_member(id));
 create policy "members read" on public.conversation_members for select to authenticated using (public.is_member(conversation_id));
 create policy "messages read" on public.messages for select to authenticated using (public.is_member(conversation_id));
@@ -296,22 +187,7 @@ create table if not exists public.app_secrets (
   value text not null
 );
 
-create or replace function public.push_dispatch(p_user uuid, p_payload jsonb)
-returns void language plpgsql security definer set search_path = public as $$
-declare v_url text; v_secret text;
-begin
-  if p_user is null then return; end if;
-  select value into v_url from app_secrets where key = 'push_url';
-  if v_url is null then return; end if;
-  if not exists (select 1 from push_subscriptions where user_id = p_user) then return; end if;
-  select value into v_secret from app_secrets where key = 'push_secret';
-  perform net.http_post(
-    url := v_url,
-    body := jsonb_build_object('user_id', p_user, 'payload', p_payload),
-    headers := jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', coalesce(v_secret, '')));
-exception when others then
-  raise warning 'push_dispatch: %', sqlerrm;
-end $$;
+-- push_dispatch (Push-ის გაგზავნა) ფაილის ბოლოსაა — ეტაპი D (შეტყობინებების პარამეტრებით)
 
 create or replace function public.game_title(p_type text)
 returns text language sql immutable as $$
@@ -393,3 +269,197 @@ create policy "push own" on public.push_subscriptions for all to authenticated
 drop policy if exists "hands own" on public.game_hands;
 create policy "hands own" on public.game_hands for select to authenticated using (user_id = auth.uid());
 -- app_secrets და game_private: პოლიტიკა არ არის — მხოლოდ სერვერი (service role)
+
+-- ---------------------------------------------------------------------
+-- უსაფრთხოება: შიდა ფუნქციები კლიენტიდან არ გამოიძახება
+-- ---------------------------------------------------------------------
+revoke execute on function public.notify(uuid, uuid, text, uuid, uuid) from public, anon, authenticated;
+revoke execute on function public.apply_result(public.games, uuid) from public, anon, authenticated;
+revoke execute on function public.svc_claim_game(uuid, text, text, uuid) from public, anon, authenticated;
+revoke execute on function public.svc_join_game(uuid, uuid) from public, anon, authenticated;
+revoke execute on function public.svc_finish(uuid, uuid, text) from public, anon, authenticated;
+grant execute on function public.svc_claim_game(uuid, text, text, uuid) to service_role;
+grant execute on function public.svc_join_game(uuid, uuid) to service_role;
+grant execute on function public.svc_finish(uuid, uuid, text) to service_role;
+
+-- =====================================================================
+--  v3: ჯგუფები, ივენთები, #თეგები
+-- =====================================================================
+create or replace function public.is_group_member(p_group uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.group_members where group_id = p_group and user_id = auth.uid() and status = 'active');
+$$;
+
+create or replace function public.is_group_admin(p_group uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.group_members where group_id = p_group and user_id = auth.uid()
+                 and status = 'active' and role in ('owner', 'admin'));
+$$;
+
+-- საჯარო ჯგუფის პოსტებს ყველა ხედავს, დახურულისას — მხოლოდ წევრები
+create or replace function public.can_see_group(p_group uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select p_group is null
+      or exists (select 1 from public.groups where id = p_group and privacy = 'public')
+      or public.is_group_member(p_group);
+$$;
+
+-- #თეგები ტექსტიდან (ლათინური, ციფრები, ქართული ასოები)
+create or replace function public.extract_hashtags(t text)
+returns text[] language sql immutable as $$
+  select coalesce(array_agg(distinct lower(m[1])), '{}')
+  from regexp_matches(coalesce(t, ''), '#([A-Za-z0-9_ა-ჿ]{2,40})', 'g') as m;
+$$;
+
+create or replace function public.posts_tags()
+returns trigger language plpgsql as $$
+begin
+  new.hashtags := public.extract_hashtags(new.body);
+  return new;
+end $$;
+drop trigger if exists posts_tags on public.posts;
+create trigger posts_tags before insert or update of body on public.posts
+  for each row execute function public.posts_tags();
+update public.posts set hashtags = public.extract_hashtags(body) where body like '%#%' and hashtags = '{}';
+
+-- ჯგუფის შემქმნელი ავტომატურად მფლობელია
+create or replace function public.on_group_created()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into group_members (group_id, user_id, role, status) values (new.id, new.owner_id, 'owner', 'active')
+  on conflict do nothing;
+  return new;
+end $$;
+drop trigger if exists groups_after_insert on public.groups;
+create trigger groups_after_insert after insert on public.groups
+  for each row execute function public.on_group_created();
+
+create or replace function public.on_group_member_change()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  update groups set members_count = (select count(*) from group_members where group_id = coalesce(new.group_id, old.group_id) and status = 'active')
+   where id = coalesce(new.group_id, old.group_id);
+  return coalesce(new, old);
+end $$;
+drop trigger if exists group_members_count on public.group_members;
+create trigger group_members_count after insert or update or delete on public.group_members
+  for each row execute function public.on_group_member_change();
+
+create or replace function public.join_group(p_group uuid)
+returns text language plpgsql security definer set search_path = public as $$
+declare v_privacy text; v_status text; v_admin uuid;
+begin
+  if not public.can_act() then raise exception 'ანგარიში შეზღუდულია'; end if;
+  select privacy into v_privacy from groups where id = p_group;
+  if not found then raise exception 'ჯგუფი ვერ მოიძებნა'; end if;
+  v_status := case when v_privacy = 'public' then 'active' else 'pending' end;
+  insert into group_members (group_id, user_id, status) values (p_group, auth.uid(), v_status)
+  on conflict (group_id, user_id) do nothing;
+  if v_status = 'pending' then
+    for v_admin in select user_id from group_members where group_id = p_group and role in ('owner', 'admin') and status = 'active' loop
+      insert into notifications (user_id, actor_id, type, group_id) values (v_admin, auth.uid(), 'group_request', p_group);
+    end loop;
+  end if;
+  return v_status;
+end $$;
+
+create or replace function public.leave_group(p_group uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if exists (select 1 from groups where id = p_group and owner_id = auth.uid()) then
+    raise exception 'მფლობელი ჯგუფს ვერ დატოვებს — ჯერ წაშალე ან გადაეცი სხვას';
+  end if;
+  delete from group_members where group_id = p_group and user_id = auth.uid();
+end $$;
+
+-- p_action: 'approve' | 'remove' | 'make_admin' | 'make_member'
+create or replace function public.manage_member(p_group uuid, p_user uuid, p_action text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_group_admin(p_group) then raise exception 'მხოლოდ ადმინისთვის'; end if;
+  if exists (select 1 from groups where id = p_group and owner_id = p_user) then raise exception 'მფლობელს ვერ შეცვლი'; end if;
+  if p_action = 'approve' then
+    update group_members set status = 'active' where group_id = p_group and user_id = p_user and status = 'pending';
+    if found then insert into notifications (user_id, actor_id, type, group_id) values (p_user, auth.uid(), 'group_approved', p_group); end if;
+  elsif p_action = 'remove' then
+    delete from group_members where group_id = p_group and user_id = p_user;
+  elsif p_action in ('make_admin', 'make_member') then
+    update group_members set role = case p_action when 'make_admin' then 'admin' else 'member' end
+     where group_id = p_group and user_id = p_user and status = 'active';
+  end if;
+end $$;
+
+create or replace function public.tag_posts(p_tag text, p_before timestamptz default now(), p_limit int default 20)
+returns setof public.posts language sql stable security invoker set search_path = public as $$
+  select p.* from posts p
+  where p.hashtags @> array[lower(ltrim(p_tag, '#'))] and p.parent_id is null and p.created_at < p_before
+  order by p.created_at desc
+  limit p_limit;
+$$;
+
+create or replace function public.trending_tags(p_limit int default 12)
+returns table (tag text, posts bigint) language sql stable security invoker set search_path = public as $$
+  select t, count(*) from posts p, unnest(p.hashtags) as t
+  where p.created_at > now() - interval '7 days'
+  group by t order by count(*) desc, max(p.created_at) desc
+  limit p_limit;
+$$;
+
+-- RSVP მთვლელები + მასპინძლისთვის შეტყობინება
+create or replace function public.on_rsvp_change()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_event uuid := coalesce(new.event_id, old.event_id); v_host uuid;
+begin
+  update events set
+    going_count = (select count(*) from event_rsvps where event_id = v_event and status = 'going'),
+    interested_count = (select count(*) from event_rsvps where event_id = v_event and status = 'interested')
+   where id = v_event returning host_id into v_host;
+  if tg_op = 'INSERT' and new.status = 'going' then
+    perform public.notify(v_host, new.user_id, 'event_rsvp');
+    update notifications set event_id = v_event
+     where id = (select id from notifications where user_id = v_host and actor_id = new.user_id and type = 'event_rsvp' order by created_at desc limit 1);
+  end if;
+  return coalesce(new, old);
+end $$;
+drop trigger if exists event_rsvps_change on public.event_rsvps;
+create trigger event_rsvps_change after insert or update or delete on public.event_rsvps
+  for each row execute function public.on_rsvp_change();
+
+-- Push: ახალი ტიპების ტექსტები
+create or replace function public.on_notification_push()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_actor text; v_group text; v_event text;
+begin
+  select coalesce(nullif(full_name, ''), username) into v_actor from profiles where id = new.actor_id;
+  select name into v_group from groups where id = new.group_id;
+  select title into v_event from events where id = new.event_id;
+  perform public.push_dispatch(new.user_id, jsonb_build_object(
+    'title', case when new.type like 'tournament%' or new.type = 'listing_price' then coalesce(new.data ->> 'title', 'ეზო') else coalesce(v_actor, 'ეზო') end,
+    'body', case new.type
+      when 'tournament_start' then 'ტურნირი დაიწყო — შემოდი და ითამაშე'
+      when 'tournament_end' then case when (new.data ->> 'place')::int = 1 then '🏆 გაიმარჯვე ტურნირში!'
+        else 'ტურნირი დასრულდა. შენი ადგილი: მე-' || (new.data ->> 'place') || ' (' || (new.data ->> 'players') || '-დან)' end
+      when 'like' then 'მოიწონა შენი პოსტი' when 'reply' then 'გიპასუხა' when 'quote' then 'გაგიზიარა ციტატით'
+      when 'follow' then 'გამოგიწერა' when 'gift' then 'საჩუქარი გამოგიგზავნა'
+      when 'follow_request' then 'გამოწერას გთხოვს' when 'follow_accept' then 'დაგიდასტურა გამოწერა'
+      when 'achievement' then 'ახალი მიღწევა: ' || coalesce((select title from badges where key = new.data ->> 'badge'), '') || ' (+' || (new.data ->> 'coins') || ' ბროწეული)'
+      when 'invite_joined' then 'შენი მოწვევით შემოგვიერთდა 🎉 +20 ბროწეული'
+      when 'level_up' then 'ახალი დონე: ' || (new.data ->> 'level') || '! +' || (new.data ->> 'coins') || ' ბროწეული'
+      when 'listing_price' then 'შენახულ განცხადებას ფასი დაუკლეს: ' || public.price_text((new.data ->> 'price')::numeric, new.data ->> 'currency')
+      when 'match' then 'თქვენ ერთმანეთი მოიწონეთ!' when 'game_invite' then 'თამაშში გეპატიჟება'
+      when 'group_request' then 'ითხოვს გაწევრიანებას: ' || coalesce(v_group, 'ჯგუფი')
+      when 'group_approved' then 'მიგიღეს ჯგუფში: ' || coalesce(v_group, '')
+      when 'event_rsvp' then 'მოდის: ' || coalesce(v_event, 'შენს ივენთზე')
+      else 'ახალი შეტყობინება' end,
+    'url', case when new.type = 'game_invite' and new.game_id is not null then '/g/' || new.game_id
+                when new.tournament_id is not null then '/t/' || new.tournament_id
+                when new.type = 'match' then '/dating?tab=matches'
+                when new.type = 'follow_request' then '/requests'
+                when new.type = 'listing_price' then '/market/' || (new.data ->> 'listing_id')
+                when new.type in ('achievement', 'level_up') then '/rewards'
+                when new.group_id is not null then '/groups/' || (select slug from groups where id = new.group_id)
+                when new.event_id is not null then '/events/' || new.event_id
+                when new.post_id is not null then '/p/' || new.post_id else '/notifications' end,
+    'tag', 'n-' || new.type || '-' || coalesce(new.post_id::text, new.group_id::text, new.tournament_id::text, new.data ->> 'listing_id', new.actor_id::text, '')));
+  return new;
+end $$;

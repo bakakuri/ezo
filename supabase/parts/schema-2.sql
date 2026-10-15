@@ -1,65 +1,5 @@
 -- ეზო — სქემის ნაწილი 2/8. გაუშვი 1-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
-drop function if exists public.my_conversations();
-create or replace function public.my_conversations()
-returns table (id uuid, kind text, updated_at timestamptz, last_message text, last_sender uuid, unread boolean, other jsonb,
-               title text, avatar_url text, my_role text, members_count bigint, members jsonb, last_sender_name text)
-language sql stable security definer set search_path = public as $$
-  select c.id, c.kind, c.updated_at, c.last_message, c.last_sender,
-    (c.last_sender is not null and c.last_sender <> auth.uid() and c.updated_at > m.last_read_at) as unread,
-    case when c.kind <> 'group' then
-      (select jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name,
-               'avatar_url', p.avatar_url, 'last_seen', p.last_seen)
-         from conversation_members o join profiles p on p.id = o.user_id
-        where o.conversation_id = c.id and o.user_id <> auth.uid() limit 1) end as other,
-    c.title, c.avatar_url, m.role,
-    (select count(*) from conversation_members x where x.conversation_id = c.id),
-    (select coalesce(jsonb_agg(jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url)), '[]')
-       from (select p.* from conversation_members o join profiles p on p.id = o.user_id
-              where o.conversation_id = c.id and o.user_id <> auth.uid() order by o.user_id limit 3) p),
-    (select coalesce(nullif(split_part(full_name, ' ', 1), ''), username) from profiles where id = c.last_sender)
-  from conversations c
-  join conversation_members m on m.conversation_id = c.id and m.user_id = auth.uid()
-  where public.mfa_ok()
-  order by c.updated_at desc;
-$$;
-
-create or replace function public.mark_read(p_conv uuid)
-returns void language sql security definer set search_path = public as $$
-  update conversation_members set last_read_at = now()
-  where conversation_id = p_conv and user_id = auth.uid();
-$$;
-
--- ---------------------------------------------------------------------
--- გაცნობა (Tinder + Badoo) — მხოლოდ 18+
--- ---------------------------------------------------------------------
-create table if not exists public.dating_profiles (
-  user_id uuid primary key references public.profiles on delete cascade,
-  enabled boolean not null default true,
-  birth_date date not null,
-  gender text not null check (gender in ('man', 'woman')),
-  looking_for text not null default 'everyone' check (looking_for in ('man', 'woman', 'everyone')),
-  bio text not null default '' check (char_length(bio) <= 500),
-  photos jsonb not null default '[]'::jsonb,
-  interests text[] not null default '{}',
-  city text not null default '',
-  age_min int not null default 18 check (age_min >= 18),
-  age_max int not null default 60 check (age_max <= 99),
-  created_at timestamptz not null default now()
-);
-
-create or replace function public.check_dating_age()
-returns trigger language plpgsql as $$
-begin
-  if new.birth_date > (current_date - interval '18 years')::date then
-    raise exception 'გაცნობის რეჟიმი მხოლოდ 18 წლიდანაა';
-  end if;
-  return new;
-end $$;
-drop trigger if exists dating_age on public.dating_profiles;
-create trigger dating_age before insert or update on public.dating_profiles
-  for each row execute function public.check_dating_age();
-
 create table if not exists public.swipes (
   swiper_id uuid references public.profiles on delete cascade,
   target_id uuid references public.profiles on delete cascade,
@@ -430,7 +370,113 @@ returns void language sql security definer set search_path = public as $$
   on conflict (profile_id, visitor_id) do update set visited_at = now();
 $$;
 
-create or replace function public.touch_last_seen()
-returns void language sql security definer set search_path = public as $$
-  update profiles set last_seen = now() where id = auth.uid();
+-- touch_last_seen ფაილის ბოლოსაა — ეტაპი D (დღიური აქტიურობით)
+
+create or replace function public.suggested_people(p_limit int default 12)
+returns setof public.profiles language sql stable security definer set search_path = public as $$
+  with me as (select * from profiles where id = auth.uid())
+  select p.* from profiles p cross join me
+  where p.id <> me.id and p.onboarded and (p.banned_until is null or p.banned_until < now())
+    and p.id not in (select following_id from follows where follower_id = me.id)
+    and not public.is_blocked(me.id, p.id)
+  order by
+    (me.school <> '' and lower(p.school) = lower(me.school)) desc,
+    (me.city <> '' and lower(p.city) = lower(me.city)) desc,
+    (select count(*) from follows f1 join follows f2 on f2.follower_id = f1.following_id
+      where f1.follower_id = me.id and f2.following_id = p.id) desc,
+    p.followers_count desc
+  limit p_limit;
 $$;
+
+-- ---------------------------------------------------------------------
+-- დახურული პროფილი და „ახლო მეგობრები“ — ხილვადობის დამხმარე ფუნქციები
+-- ---------------------------------------------------------------------
+alter table public.profiles add column if not exists is_private boolean not null default false;
+
+create or replace function public.is_private_profile(p_id uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select coalesce((select is_private from profiles where id = p_id), false);
+$$;
+
+-- ხედავს თუ არა მიმდინარე მომხმარებელი ავტორის პოსტებს/სთორიებს
+create or replace function public.can_see_author(p_author uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select p_author = auth.uid()
+      or not public.is_private_profile(p_author)
+      or exists (select 1 from follows where follower_id = auth.uid() and following_id = p_author)
+      or public.is_staff();
+$$;
+
+create or replace function public.story_audience_ok(p_author uuid, p_audience text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select p_audience = 'all' or p_author = auth.uid()
+      or exists (select 1 from close_friends where owner_id = p_author and friend_id = auth.uid());
+$$;
+
+-- ---------------------------------------------------------------------
+-- Row Level Security
+-- ---------------------------------------------------------------------
+alter table public.profiles enable row level security;
+alter table public.blocks enable row level security;
+alter table public.reports enable row level security;
+alter table public.follows enable row level security;
+alter table public.posts enable row level security;
+alter table public.likes enable row level security;
+alter table public.stories enable row level security;
+alter table public.story_views enable row level security;
+alter table public.profile_visits enable row level security;
+alter table public.gifts enable row level security;
+alter table public.notifications enable row level security;
+alter table public.conversations enable row level security;
+alter table public.conversation_members enable row level security;
+alter table public.messages enable row level security;
+alter table public.dating_profiles enable row level security;
+alter table public.swipes enable row level security;
+alter table public.matches enable row level security;
+alter table public.games enable row level security;
+alter table public.game_stats enable row level security;
+
+do $$ declare r record; begin
+  for r in select policyname, tablename from pg_policies where schemaname = 'public' loop
+    execute format('drop policy if exists %I on public.%I', r.policyname, r.tablename);
+  end loop;
+end $$;
+
+create policy "profiles read" on public.profiles for select to authenticated using (true);
+create policy "profiles update own" on public.profiles for update to authenticated using (id = auth.uid()) with check (id = auth.uid());
+
+create policy "blocks own" on public.blocks for all to authenticated using (blocker_id = auth.uid()) with check (blocker_id = auth.uid());
+create policy "reports insert" on public.reports for insert to authenticated with check (reporter_id = auth.uid());
+
+create policy "follows read" on public.follows for select to authenticated using (true);
+create policy "follows insert own" on public.follows for insert to authenticated
+  with check (follower_id = auth.uid() and not public.is_blocked(follower_id, following_id) and not public.is_private_profile(following_id));
+create policy "follows delete own" on public.follows for delete to authenticated using (follower_id = auth.uid());
+
+create policy "posts read" on public.posts for select to authenticated
+  using (not public.is_blocked(auth.uid(), author_id) and (not hidden or author_id = auth.uid() or public.is_staff()));
+create policy "posts insert own" on public.posts for insert to authenticated with check (author_id = auth.uid() and public.can_act());
+create policy "posts update own" on public.posts for update to authenticated using (author_id = auth.uid());
+create policy "posts delete own" on public.posts for delete to authenticated using (author_id = auth.uid());
+
+create policy "likes read" on public.likes for select to authenticated using (true);
+create policy "likes insert own" on public.likes for insert to authenticated with check (user_id = auth.uid());
+create policy "likes delete own" on public.likes for delete to authenticated using (user_id = auth.uid());
+
+create policy "stories read active" on public.stories for select to authenticated
+  using ((expires_at > now() or author_id = auth.uid()) and not public.is_blocked(auth.uid(), author_id)
+         and public.can_see_author(author_id) and public.story_audience_ok(author_id, audience));
+create policy "stories insert own" on public.stories for insert to authenticated with check (author_id = auth.uid() and public.can_act());
+create policy "stories delete own" on public.stories for delete to authenticated using (author_id = auth.uid());
+
+create policy "story views insert" on public.story_views for insert to authenticated with check (viewer_id = auth.uid());
+create policy "story views read" on public.story_views for select to authenticated using (
+  viewer_id = auth.uid() or exists (select 1 from public.stories s where s.id = story_id and s.author_id = auth.uid()));
+
+create policy "visits owner reads" on public.profile_visits for select to authenticated using (profile_id = auth.uid());
+
+create policy "gifts read" on public.gifts for select to authenticated using (true);
+create policy "gifts send" on public.gifts for insert to authenticated with check (from_id = auth.uid() and public.can_act());
+
+create policy "notifications own" on public.notifications for select to authenticated using (user_id = auth.uid());
+create policy "notifications mark read" on public.notifications for update to authenticated using (user_id = auth.uid());

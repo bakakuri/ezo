@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { Link, useLocation } from '../lib/router.jsx'
 import { Icon, Mark } from './Icon.jsx'
-import { Avatar, PersonRow } from './ui.jsx'
+import { Avatar } from './ui.jsx'
 import { useAuth } from '../lib/auth.jsx'
 import { api } from '../lib/api.js'
 import { useComposer } from './Composer.jsx'
+import { SuggestList } from './Suggest.jsx'
 
 const UnreadCtx = createContext({ notifications: 0, messages: 0, refresh: () => {} })
 
@@ -88,11 +89,8 @@ export function SideNav() {
 }
 
 export function Aside() {
-  const [people, setPeople] = useState([])
   const [games, setGames] = useState([])
-  const [followed, setFollowed] = useState({})
   useEffect(() => {
-    api.suggested().then((p) => setPeople(p.slice(0, 5))).catch(() => {})
     api.myGames().then(setGames).catch(() => {})
   }, [])
   return (
@@ -103,20 +101,10 @@ export function Aside() {
           {games.slice(0, 4).map((g) => <GameLine key={g.id} g={g} />)}
         </div>
       )}
-      {people.length > 0 && (
-        <div className="aside-card">
-          <h3>შეიძლება იცნობდე</h3>
-          {people.map((p) => (
-            <PersonRow key={p.id} user={p} sub={p.school || p.city || `@${p.username}`} right={
-              <button className={`btn sm ${followed[p.id] ? 'btn-outline' : 'btn-primary'}`} onClick={async () => {
-                const on = !followed[p.id]
-                setFollowed((f) => ({ ...f, [p.id]: on }))
-                await api.follow(p.id, on)
-              }}>{followed[p.id] ? 'გამოწერილია' : 'გამოწერა'}</button>
-            } />
-          ))}
-        </div>
-      )}
+      <div className="aside-card">
+        <h3>შეიძლება იცნობდე</h3>
+        <SuggestList limit={5} />
+      </div>
       <p className="aside-foot">ეზო · ქართული სოციალური ქსელი</p>
     </aside>
   )

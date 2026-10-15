@@ -92,12 +92,24 @@ export function Loader() {
   return <div className="page-loader"><div className="spinner" /></div>
 }
 
+// დადასტურებული ანგარიში — ნიშანს მხოლოდ ადმინი ანიჭებს
+export function Verified({ user, size = 16 }) {
+  if (!user?.verified) return null
+  return (
+    <svg className="verified" width={size} height={size} viewBox="0 0 24 24" role="img" aria-label="დადასტურებული ანგარიში">
+      <title>დადასტურებული ანგარიში</title>
+      <path d="M12 1.8l2.6 1.9 3.2-.1 1 3.1 2.6 1.9-1 3.1 1 3.1-2.6 1.9-1 3.1-3.2-.1L12 22.2l-2.6-1.9-3.2.1-1-3.1-2.6-1.9 1-3.1-1-3.1 2.6-1.9 1-3.1 3.2.1z" fill="currentColor" />
+      <path d="M8 12.3l2.7 2.7L16.2 9.5" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export function PersonRow({ user, sub, right }) {
   return (
     <div className="person-row">
       <Link to={`/u/${user.username}`}><Avatar user={user} size={46} online /></Link>
       <Link to={`/u/${user.username}`} className="who">
-        <b>{user.full_name || user.username}</b>
+        <b>{user.full_name || user.username}<Verified user={user} size={15} /></b>
         <small>{sub ?? `@${user.username}`}</small>
       </Link>
       {right}

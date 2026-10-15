@@ -8,6 +8,7 @@ import { timeAgo, banText } from '../lib/format.js'
 import { categoryName } from '../components/Report.jsx'
 import { priceText } from '../lib/market.js'
 import { useToast } from '../components/Toast.jsx'
+import AdminAnalytics from './AdminAnalytics.jsx'
 
 export default function Admin() {
   const { me } = useAuth()
@@ -54,8 +55,8 @@ export default function Admin() {
           <div><b>{stats.active_games}</b><span>აქტიური თამაში</span></div>
         </div>
       )}
-      <div className="seg" role="tablist">
-        {[['reports', 'რეპორტები'], ['words', 'სიტყვები'], ['errors', 'შეცდომები']].map(([k, l]) => (
+      <div className="seg admin-seg" role="tablist">
+        {[['reports', 'რეპორტები'], ['words', 'სიტყვები'], ['errors', 'შეცდომები'], ...(me?.role === 'admin' ? [['stats', 'ანალიტიკა']] : [])].map(([k, l]) => (
           <button key={k} role="tab" aria-selected={section === k} className={section === k ? 'on' : ''} onClick={() => setSection(k)}>
             {l}{k === 'errors' && errCount > 0 && <span className="tab-count" aria-label={`${errCount} ბოლო 24 საათში`}>{errCount}</span>}
           </button>
@@ -63,6 +64,7 @@ export default function Admin() {
       </div>
       {section === 'words' && <BannedWords />}
       {section === 'errors' && <ErrorLog onCount={setErrCount} />}
+      {section === 'stats' && <AdminAnalytics />}
       {reportsTab && (
         <div className="chips admin-filter" role="group" aria-label="რეპორტის სტატუსი">
           {[['open', 'ღია'], ['resolved', 'დახურული'], ['dismissed', 'უარყოფილი']].map(([k, l]) => (

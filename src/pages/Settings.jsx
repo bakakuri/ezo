@@ -64,6 +64,7 @@ export default function Settings() {
         <div className="grow">შეტყობინებები ტელეფონზე<small>{push ? pushHint[push] : '…'}</small></div>
         {(push === 'on' || push === 'off') && <Toggle on={push === 'on'} onChange={togglePush} label="Push შეტყობინებები" />}
       </div>
+      <Link to="/settings/notifications" className="setting-row"><Icon name="sliders" /><div className="grow">რაზე მოგივიდეს<small>მესიჯები, მოწონებები, თამაშები… და ჩუმი საათები</small></div><Icon name="back" size={18} className="chev" /></Link>
       <div className="section-title"><h2>კონფიდენციალურობა</h2></div>
       <div className="setting-row">
         <Icon name="lock" />
@@ -88,14 +89,89 @@ export default function Settings() {
       <Link to="/dating" className="setting-row"><Icon name="flame" /><div className="grow">გაცნობის პროფილი<small>ჩართვა, ფოტოები, ასაკი</small></div></Link>
       <Link to="/explore?tab=classmates" className="setting-row"><Icon name="school" /><div className="grow">კლასელების ძებნა</div></Link>
       {['moderator', 'admin'].includes(me?.role) && (
-        <Link to="/admin" className="setting-row"><Icon name="flag" /><div className="grow">მოდერაცია<small>რეპორტები და შეზღუდვები</small></div></Link>
+        <Link to="/admin" className="setting-row"><Icon name="flag" /><div className="grow">მოდერაცია<small>რეპორტები, სიტყვები და შეცდომები</small></div></Link>
       )}
+      <Link to="/privacy" className="setting-row"><Icon name="lock" /><div className="grow">კონფიდენციალურობა<small>რას ვინახავთ და ვინ რას ხედავს</small></div></Link>
+      <Link to="/terms" className="setting-row"><Icon name="book" /><div className="grow">წესები</div></Link>
       <div className="hr" style={{ margin: '8px 16px' }} />
       <button className="setting-row" onClick={async () => { await disablePush().catch(() => {}); api.signOut() }} style={{ color: 'var(--accent)' }}><Icon name="logout" /><div className="grow">გამოსვლა</div></button>
       {api.demo && <p className="pad xs faint">დემო რეჟიმი: მონაცემები მხოლოდ ამ ჩანართში ცოცხლობს. Supabase-ის მისაერთებლად იხ. README.</p>}
       {sheet === 'invite' && <ShareSheet user={me} invite onClose={() => setSheet(null)} />}
       {sheet === '2fa' && mfa && <TwoFactorSheet state={mfa} onClose={() => setSheet(null)} onChange={loadMfa} />}
       {sheet === 'delete' && <DeleteAccountSheet onClose={() => setSheet(null)} />}
+    </>
+  )
+}
+
+// რომელი Push მოვიდეს ტელეფონზე (სერვერი ამოწმებს — ბრაუზერის დახურვის შემდეგაც მოქმედებს)
+const PREF_GROUPS = [
+  ['მიმოწერა', [['messages', 'მესიჯები', 'პირადი და ჯგუფური ჩატი'], ['calls', 'ზარები', 'შემომავალი ხმოვანი და ვიდეოზარი']]],
+  ['შენზე', [['replies', 'პასუხები და ციტატები', 'როცა შენს პოსტს უპასუხებენ'], ['likes', 'მოწონებები', 'როცა შენს პოსტს მოიწონებენ'],
+    ['follows', 'გამოწერები', 'ახალი გამომწერი, თხოვნა, მოწვევით შემოსული მეგობარი']]],
+  ['სხვა', [['games', 'თამაშები', 'შენი სვლა, მოწვევა, ტურნირის დაწყება და შედეგი'], ['dating', 'გაცნობა', 'ახალი წყვილი'],
+    ['market', 'ბაზარი', 'შენახულ განცხადებას ფასი დაუკლეს'], ['groups', 'ჯგუფები და ივენთები', 'მიღება ჯგუფში, ვინ მოდის შენს ივენთზე'],
+    ['rewards', 'საჩუქრები და მიღწევები', 'საჩუქარი, ახალი დონე, მედალი']]],
+]
+const PREF_DEFAULTS = { messages: true, calls: true, replies: true, likes: true, follows: true, games: true, dating: true, market: true, groups: true, rewards: true, quiet_from: null, quiet_to: null }
+const HOURS = Array.from({ length: 24 }, (_, h) => h)
+const hh = (h) => `${String(h).padStart(2, '0')}:00`
+
+export function NotificationSettings() {
+  const toast = useToast()
+  const [prefs, setPrefs] = useState(null)
+  const [push, setPush] = useState(null)
+  useEffect(() => {
+    api.notificationPrefs().then((p) => setPrefs({ ...PREF_DEFAULTS, ...(p || {}) })).catch(() => setPrefs({ ...PREF_DEFAULTS }))
+    pushStatus().then(setPush)
+  }, [])
+  const save = async (patch) => {
+    const before = prefs
+    setPrefs((p) => ({ ...p, ...patch }))
+    try { await api.saveNotificationPrefs(patch) } catch (e) { setPrefs(before); toast(e.message, 'error') }
+  }
+  if (!prefs) return <><TopBar title="შეტყობინებები" backTo="/settings" /><div className="center pad"><div className="spinner" /></div></>
+  const quiet = prefs.quiet_from !== null && prefs.quiet_to !== null
+  return (
+    <>
+      <TopBar title="შეტყობინებები" backTo="/settings" />
+      <p className="pad small muted" style={{ paddingBottom: 4 }}>ეს ეხება ტელეფონზე მოსულ შეტყობინებებს. აპში, „შეტყობინებებში“, ყველაფერი ისევ ჩანს.</p>
+      {push && push !== 'on' && (
+        <div className="notice" style={{ margin: '4px 16px 8px' }}>
+          {push === 'off' ? 'ამ მოწყობილობაზე Push გამორთულია — ჩართე „პარამეტრებში“.' : push === 'denied' ? 'ბრაუზერში შეტყობინებები დაბლოკილია.' : 'ამ მოწყობილობაზე Push არ მუშაობს — პარამეტრები სხვა მოწყობილობებზე მოქმედებს.'}
+        </div>
+      )}
+      {PREF_GROUPS.map(([title, items]) => (
+        <section key={title} aria-label={title}>
+          <div className="section-title"><h2>{title}</h2></div>
+          {items.map(([k, label, hint]) => (
+            <div key={k} className="setting-row">
+              <div className="grow">{label}<small>{hint}</small></div>
+              <Toggle on={prefs[k]} onChange={(on) => save({ [k]: on })} label={label} />
+            </div>
+          ))}
+        </section>
+      ))}
+      <div className="section-title"><h2>ჩუმი საათები</h2></div>
+      <div className="setting-row">
+        <Icon name="moon" />
+        <div className="grow">არ შემაწუხო<small>{quiet ? `${hh(prefs.quiet_from)}-დან ${hh(prefs.quiet_to)}-მდე Push არ მოვა (ზარების გარდა)` : 'ღამით შეტყობინებები არ მოვა, ზარების გარდა'}</small></div>
+        <Toggle on={quiet} onChange={(on) => save(on ? { quiet_from: 23, quiet_to: 8 } : { quiet_from: null, quiet_to: null })} label="ჩუმი საათები" />
+      </div>
+      {quiet && (
+        <div className="quiet-hours">
+          <label className="field"><span>დან</span>
+            <select className="input" value={prefs.quiet_from} onChange={(e) => save({ quiet_from: Number(e.target.value) })}>
+              {HOURS.map((h) => <option key={h} value={h}>{hh(h)}</option>)}
+            </select>
+          </label>
+          <label className="field"><span>მდე</span>
+            <select className="input" value={prefs.quiet_to} onChange={(e) => save({ quiet_to: Number(e.target.value) })}>
+              {HOURS.map((h) => <option key={h} value={h}>{hh(h)}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
+      <p className="pad xs faint">დრო — თბილისის. ცვლილება მაშინვე ინახება და ყველა მოწყობილობაზე მოქმედებს.</p>
     </>
   )
 }

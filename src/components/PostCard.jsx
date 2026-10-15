@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Avatar, Sheet } from './ui.jsx'
+import { Avatar, Sheet, Verified } from './ui.jsx'
 import { Icon } from './Icon.jsx'
 import { Link, navigate } from '../lib/router.jsx'
 import { timeAgo, count } from '../lib/format.js'
@@ -41,7 +41,7 @@ export function QuoteCard({ post }) {
   if (!post) return null
   return (
     <Link to={`/p/${post.id}`} className="quote-card" onClick={(e) => e.stopPropagation()}>
-      <div className="qhead"><Avatar user={post.author} size={20} /><b>{post.author?.full_name || post.author?.username}</b><span className="faint">{timeAgo(post.created_at)}</span></div>
+      <div className="qhead"><Avatar user={post.author} size={20} /><b>{post.author?.full_name || post.author?.username}</b><Verified user={post.author} size={14} /><span className="faint">{timeAgo(post.created_at)}</span></div>
       {post.body && <div className="qbody">{post.body}</div>}
       {post.media?.[0]?.type === 'image' && <img src={post.media[0].thumb || post.media[0].url} alt="" loading="lazy" decoding="async" />}
     </Link>
@@ -94,9 +94,11 @@ export function PostCard({ post: initial, threaded = false, focus = false, hideG
         </div>
       )}
       <div style={{ minWidth: 0 }}>
+        {post.pinned && <div className="pinned-label"><Icon name="pushpin" size={14} />მიმაგრებული</div>}
         <div className="post-head">
           {focus && <Link to={`/u/${a.username}`} style={{ marginRight: 6 }}><Avatar user={a} size={40} /></Link>}
           <Link to={`/u/${a.username}`} className="name" onClick={(e) => e.stopPropagation()}>{a.full_name || a.username}</Link>
+          <Verified user={a} size={15} />
           {post.group && !hideGroup && (
             <Link to={`/groups/${post.group.slug}`} className="post-group" onClick={(e) => e.stopPropagation()}>
               <Icon name="users" size={13} /><b>{post.group.name}</b>
@@ -129,6 +131,18 @@ export function PostCard({ post: initial, threaded = false, focus = false, hideG
       {menu && (
         <Sheet onClose={() => setMenu(false)}>
           <div className="menu" onClick={(e) => e.stopPropagation()}>
+            {a.id === me?.id && !post.parent_id && !post.group_id && (
+              <button onClick={async () => {
+                setMenu(false)
+                const on = !post.pinned
+                try {
+                  await api.pinPost(on ? post.id : null)
+                  setPost((p) => ({ ...p, pinned: on }))
+                  toast(on ? 'პოსტი პროფილზე მიმაგრდა' : 'მიმაგრება მოიხსნა')
+                  window.dispatchEvent(new CustomEvent('ezo:pinned', { detail: on ? post.id : null }))
+                } catch (er) { toast(er.message, 'error') }
+              }}><Icon name="pushpin" />{post.pinned ? 'მიმაგრების მოხსნა' : 'პროფილზე მიმაგრება'}</button>
+            )}
             {a.id === me?.id ? (
               <button className="danger" onClick={async () => {
                 setMenu(false)

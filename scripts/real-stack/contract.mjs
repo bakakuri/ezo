@@ -4,9 +4,10 @@
 import { createHmac } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as chess from '../../src/games/chess.js'
+import { skeleton } from '../../src/lib/translit.js'
 
 const OUT = resolve(process.argv[2] || '.real-stack')
 globalThis.location = { origin: 'http://localhost:5179', href: 'http://localhost:5179/', pathname: '/', search: '' }
@@ -202,6 +203,97 @@ await step('A: error log grouped + clear', async () => {
 await step('A: ban + unban C', async () => { await A.adminBan(pc.id, 1, 'ტესტი'); await A.adminUnban(pc.id) })
 await step('A: rewards boards', async () => { await A.profileProgress(pb.id); await A.xpLeaderboard('all'); await A.xpLeaderboard('friends') })
 await step('A: delete post', () => A.deletePost(p2))
+
+// ---- ეტაპი C: ვის გამოიწერო, მიმაგრება, მონახაზები, ნიშანი, ქართული ძებნა
+await step('C: who_to_follow + dismiss', async () => {
+  const l = await C.suggested(20)
+  must(Array.isArray(l) && l.every((x) => x.reason && x.username), 'shape ' + JSON.stringify(l[0]))
+  const target = l[0]
+  await C.dismissSuggestion(target.id)
+  must(!(await C.suggested(20)).some((x) => x.id === target.id), 'dismissed still listed')
+})
+await step('A: pin post → first on profile, unpin', async () => {
+  const id = (await A.createPost({ body: 'მიმაგრების ტესტი' })).id
+  await A.createPost({ body: 'უფრო ახალი პოსტი' })
+  await A.pinPost(id)
+  const l = await B.userPosts(pa.id, 'posts')
+  must(l[0]?.id === id && l[0].pinned === true, 'pinned not first')
+  must(l.filter((x) => x.id === id).length === 1, 'pinned duplicated')
+  await A.pinPost(null)
+  must(!(await B.userPosts(pa.id, 'posts')).some((x) => x.pinned), 'still pinned')
+  let refused = false
+  await A.pinPost(reply).catch(() => { refused = true })
+  must(refused, 'pinned a foreign reply')
+})
+await step('A: drafts save → list → update → delete', async () => {
+  const d = await A.saveDraft({ body: 'მონახაზი', poll: { options: ['ა', 'ბ'], days: 1, multi: false } })
+  const d2 = await A.saveDraft({ id: d.id, body: 'შესწორებული მონახაზი', poll: null })
+  must(d2.id === d.id && d2.body === 'შესწორებული მონახაზი', 'update failed')
+  must((await A.drafts()).some((x) => x.id === d.id), 'not listed')
+  must(!(await B.drafts()).some((x) => x.id === d.id), 'visible to others')
+  await A.deleteDraft(d.id)
+  must(!(await A.drafts()).some((x) => x.id === d.id), 'not deleted')
+})
+await step('A (admin): verified badge visible in posts and search', async () => {
+  await A.adminSetVerified(pb.id, true)
+  const r = await A.searchAll(ub)
+  must(r.people[0]?.username === ub && r.people[0].verified === true, 'search verified ' + JSON.stringify(r.people[0]))
+  const posts = await A.userPosts(pb.id, 'replies')
+  must(posts.length === 0 || posts[0].author?.verified === true, 'author verified in embed')
+  await B.updateProfile({ bio: 'ნიშანს ვერ მოვიხსნი' })
+  must((await A.profileByUsername(ub)).verified === true, 'user changed own badge')
+  await B.adminSetVerified(pb.id, false).then(() => { throw new Error('non-admin verified') }, (e) => must(/forbidden/.test(e.message), e.message))
+})
+await step('B: Georgian search — Latin finds Georgian name and posts', async () => {
+  await A.createPost({ body: 'ნარდის ტურნირი ვაკეში #ნარდი' })
+  const r = await B.searchAll('nardis turniri')
+  must(r.posts.some((p) => p.body.startsWith('ნარდის ტურნირი')), 'post via translit')
+  must(r.posts[0]?.author?.username, 'post embed')
+  const t = await B.searchAll('#nard')
+  must(t.tags.some((x) => x.tag === 'ნარდი'), 'tag via translit')
+  const people = await B.search('gio')
+  must(Array.isArray(people), 'search() compat')
+})
+await step('JS და SQL ჩონჩხი ერთნაირია', async () => {
+  const words = ['გიორგი ბერიძე', 'Giorgi Beridze', "ch'avch'avadze", 'ჭავჭავაძე', 'Khatuna', 'ყიფიანი', 'yifiani', 'წერეთელი', 'wereteli', "Ts'otne", 'ღვინჯილია', 'ZHVANIA', 'phaliashvili', 'nino_99.b', 'ნარდი #ეზო']
+  const sqlOut = sql(`select string_agg(public.ka_skeleton(w), '|' order by n) from unnest(array[${words.map((w) => `'${w.replace(/'/g, "''")}'`).join(',')}]) with ordinality as t(w, n)`)
+  must(sqlOut === words.map(skeleton).join('|'), `SQL: ${sqlOut}\nJS:  ${words.map(skeleton).join('|')}`)
+})
+
+// ---- ეტაპი D: შეტყობინებების პარამეტრები და ანალიტიკა
+await step('B: notification prefs saved and enforced by push_allowed', async () => {
+  must((await B.notificationPrefs()) === null, 'defaults expected')
+  await B.saveNotificationPrefs({ likes: false })
+  const p = await B.saveNotificationPrefs({ quiet_from: 23, quiet_to: 8 })
+  must(p.likes === false && p.quiet_from === 23 && p.messages === true, 'saved ' + JSON.stringify(p))
+  must((await B.notificationPrefs()).likes === false, 'not persisted')
+  must(sql(`select public.push_allowed('${pb.id}', '{"tag":"n-like-x"}')`) === 'f', 'likes not blocked')
+  must(sql(`select public.push_allowed('${pb.id}', '{"tag":"call-1"}')`) === 't', 'calls blocked')
+  must(sql(`select public.push_allowed('${pa.id}', '{"tag":"n-like-x"}')`) === 't', 'other user affected')
+  await B.saveNotificationPrefs({ likes: true, quiet_from: null, quiet_to: null })
+})
+await step('A (admin): analytics; B forbidden', async () => {
+  await A.touch()
+  const r = await A.adminAnalytics(30)
+  must(r.days.length === 30 && r.days.at(-1).day === sql(`select (now() at time zone 'Asia/Tbilisi')::date`), 'days ' + r.days.at(-1)?.day)
+  must(r.totals.dau >= 2 && r.days.at(-1).posts >= 1 && r.days.at(-1).signups >= 2, 'totals ' + JSON.stringify(r.totals))
+  await B.adminAnalytics(30).then(() => { throw new Error('non-admin analytics') }, (e) => must(/forbidden/.test(e.message), e.message))
+})
+
+// ---- საჯარო ფუნქციები anon გასაღებით (Vercel-ის og.js და sitemap.js ასე იძახებს)
+await step('anon: og_preview + sitemap_entries', async () => {
+  const keys = Object.fromEntries(readFileSync(`${OUT}/keys.env`, 'utf8').trim().split('\n').map((l) => l.split('=')))
+  const call = async (fn, body) => {
+    const r = await fetch(`${process.env.SUPABASE_URL || 'http://localhost:54321'}/rest/v1/rpc/${fn}`, { method: 'POST', headers: { apikey: keys.ANON_KEY, Authorization: `Bearer ${keys.ANON_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!r.ok) throw new Error(`${fn} ${r.status} ${await r.text()}`)
+    return r.json()
+  }
+  const og = await call('og_preview', { p_kind: 'u', p_key: ua })
+  must(og?.username === ua, 'og_preview: ' + JSON.stringify(og))
+  const sm = await call('sitemap_entries', {})
+  must(sm.u.includes(ua), 'sitemap: public user missing')
+  must(Array.isArray(sm.m) && Array.isArray(sm.e), 'sitemap shape')
+})
 
 // ---- ანგარიშის წაშლა
 await step('C: deleteMyAccount', async () => { await C.deleteMyAccount(); must(sql(`select count(*) from public.profiles where username = '${uc}'`) === '0', 'profile still exists') })

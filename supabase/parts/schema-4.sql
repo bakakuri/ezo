@@ -1,201 +1,6 @@
 -- ეზო — სქემის ნაწილი 4/8. გაუშვი 3-ის შემდეგ. (მთლიანი ფაილი: supabase/schema.sql)
 
 -- ---------------------------------------------------------------------
--- უსაფრთხოება: შიდა ფუნქციები კლიენტიდან არ გამოიძახება
--- ---------------------------------------------------------------------
-revoke execute on function public.notify(uuid, uuid, text, uuid, uuid) from public, anon, authenticated;
-revoke execute on function public.apply_result(public.games, uuid) from public, anon, authenticated;
-revoke execute on function public.push_dispatch(uuid, jsonb) from public, anon, authenticated;
-revoke execute on function public.svc_claim_game(uuid, text, text, uuid) from public, anon, authenticated;
-revoke execute on function public.svc_join_game(uuid, uuid) from public, anon, authenticated;
-revoke execute on function public.svc_finish(uuid, uuid, text) from public, anon, authenticated;
-grant execute on function public.svc_claim_game(uuid, text, text, uuid) to service_role;
-grant execute on function public.svc_join_game(uuid, uuid) to service_role;
-grant execute on function public.svc_finish(uuid, uuid, text) to service_role;
-
--- =====================================================================
---  v3: ჯგუფები, ივენთები, #თეგები
--- =====================================================================
-create or replace function public.is_group_member(p_group uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.group_members where group_id = p_group and user_id = auth.uid() and status = 'active');
-$$;
-
-create or replace function public.is_group_admin(p_group uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.group_members where group_id = p_group and user_id = auth.uid()
-                 and status = 'active' and role in ('owner', 'admin'));
-$$;
-
--- საჯარო ჯგუფის პოსტებს ყველა ხედავს, დახურულისას — მხოლოდ წევრები
-create or replace function public.can_see_group(p_group uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select p_group is null
-      or exists (select 1 from public.groups where id = p_group and privacy = 'public')
-      or public.is_group_member(p_group);
-$$;
-
--- #თეგები ტექსტიდან (ლათინური, ციფრები, ქართული ასოები)
-create or replace function public.extract_hashtags(t text)
-returns text[] language sql immutable as $$
-  select coalesce(array_agg(distinct lower(m[1])), '{}')
-  from regexp_matches(coalesce(t, ''), '#([A-Za-z0-9_ა-ჿ]{2,40})', 'g') as m;
-$$;
-
-create or replace function public.posts_tags()
-returns trigger language plpgsql as $$
-begin
-  new.hashtags := public.extract_hashtags(new.body);
-  return new;
-end $$;
-drop trigger if exists posts_tags on public.posts;
-create trigger posts_tags before insert or update of body on public.posts
-  for each row execute function public.posts_tags();
-update public.posts set hashtags = public.extract_hashtags(body) where body like '%#%' and hashtags = '{}';
-
--- ჯგუფის შემქმნელი ავტომატურად მფლობელია
-create or replace function public.on_group_created()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  insert into group_members (group_id, user_id, role, status) values (new.id, new.owner_id, 'owner', 'active')
-  on conflict do nothing;
-  return new;
-end $$;
-drop trigger if exists groups_after_insert on public.groups;
-create trigger groups_after_insert after insert on public.groups
-  for each row execute function public.on_group_created();
-
-create or replace function public.on_group_member_change()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  update groups set members_count = (select count(*) from group_members where group_id = coalesce(new.group_id, old.group_id) and status = 'active')
-   where id = coalesce(new.group_id, old.group_id);
-  return coalesce(new, old);
-end $$;
-drop trigger if exists group_members_count on public.group_members;
-create trigger group_members_count after insert or update or delete on public.group_members
-  for each row execute function public.on_group_member_change();
-
-create or replace function public.join_group(p_group uuid)
-returns text language plpgsql security definer set search_path = public as $$
-declare v_privacy text; v_status text; v_admin uuid;
-begin
-  if not public.can_act() then raise exception 'ანგარიში შეზღუდულია'; end if;
-  select privacy into v_privacy from groups where id = p_group;
-  if not found then raise exception 'ჯგუფი ვერ მოიძებნა'; end if;
-  v_status := case when v_privacy = 'public' then 'active' else 'pending' end;
-  insert into group_members (group_id, user_id, status) values (p_group, auth.uid(), v_status)
-  on conflict (group_id, user_id) do nothing;
-  if v_status = 'pending' then
-    for v_admin in select user_id from group_members where group_id = p_group and role in ('owner', 'admin') and status = 'active' loop
-      insert into notifications (user_id, actor_id, type, group_id) values (v_admin, auth.uid(), 'group_request', p_group);
-    end loop;
-  end if;
-  return v_status;
-end $$;
-
-create or replace function public.leave_group(p_group uuid)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if exists (select 1 from groups where id = p_group and owner_id = auth.uid()) then
-    raise exception 'მფლობელი ჯგუფს ვერ დატოვებს — ჯერ წაშალე ან გადაეცი სხვას';
-  end if;
-  delete from group_members where group_id = p_group and user_id = auth.uid();
-end $$;
-
--- p_action: 'approve' | 'remove' | 'make_admin' | 'make_member'
-create or replace function public.manage_member(p_group uuid, p_user uuid, p_action text)
-returns void language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_group_admin(p_group) then raise exception 'მხოლოდ ადმინისთვის'; end if;
-  if exists (select 1 from groups where id = p_group and owner_id = p_user) then raise exception 'მფლობელს ვერ შეცვლი'; end if;
-  if p_action = 'approve' then
-    update group_members set status = 'active' where group_id = p_group and user_id = p_user and status = 'pending';
-    if found then insert into notifications (user_id, actor_id, type, group_id) values (p_user, auth.uid(), 'group_approved', p_group); end if;
-  elsif p_action = 'remove' then
-    delete from group_members where group_id = p_group and user_id = p_user;
-  elsif p_action in ('make_admin', 'make_member') then
-    update group_members set role = case p_action when 'make_admin' then 'admin' else 'member' end
-     where group_id = p_group and user_id = p_user and status = 'active';
-  end if;
-end $$;
-
-create or replace function public.tag_posts(p_tag text, p_before timestamptz default now(), p_limit int default 20)
-returns setof public.posts language sql stable security invoker set search_path = public as $$
-  select p.* from posts p
-  where p.hashtags @> array[lower(ltrim(p_tag, '#'))] and p.parent_id is null and p.created_at < p_before
-  order by p.created_at desc
-  limit p_limit;
-$$;
-
-create or replace function public.trending_tags(p_limit int default 12)
-returns table (tag text, posts bigint) language sql stable security invoker set search_path = public as $$
-  select t, count(*) from posts p, unnest(p.hashtags) as t
-  where p.created_at > now() - interval '7 days'
-  group by t order by count(*) desc, max(p.created_at) desc
-  limit p_limit;
-$$;
-
--- RSVP მთვლელები + მასპინძლისთვის შეტყობინება
-create or replace function public.on_rsvp_change()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_event uuid := coalesce(new.event_id, old.event_id); v_host uuid;
-begin
-  update events set
-    going_count = (select count(*) from event_rsvps where event_id = v_event and status = 'going'),
-    interested_count = (select count(*) from event_rsvps where event_id = v_event and status = 'interested')
-   where id = v_event returning host_id into v_host;
-  if tg_op = 'INSERT' and new.status = 'going' then
-    perform public.notify(v_host, new.user_id, 'event_rsvp');
-    update notifications set event_id = v_event
-     where id = (select id from notifications where user_id = v_host and actor_id = new.user_id and type = 'event_rsvp' order by created_at desc limit 1);
-  end if;
-  return coalesce(new, old);
-end $$;
-drop trigger if exists event_rsvps_change on public.event_rsvps;
-create trigger event_rsvps_change after insert or update or delete on public.event_rsvps
-  for each row execute function public.on_rsvp_change();
-
--- Push: ახალი ტიპების ტექსტები
-create or replace function public.on_notification_push()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare v_actor text; v_group text; v_event text;
-begin
-  select coalesce(nullif(full_name, ''), username) into v_actor from profiles where id = new.actor_id;
-  select name into v_group from groups where id = new.group_id;
-  select title into v_event from events where id = new.event_id;
-  perform public.push_dispatch(new.user_id, jsonb_build_object(
-    'title', case when new.type like 'tournament%' or new.type = 'listing_price' then coalesce(new.data ->> 'title', 'ეზო') else coalesce(v_actor, 'ეზო') end,
-    'body', case new.type
-      when 'tournament_start' then 'ტურნირი დაიწყო — შემოდი და ითამაშე'
-      when 'tournament_end' then case when (new.data ->> 'place')::int = 1 then '🏆 გაიმარჯვე ტურნირში!'
-        else 'ტურნირი დასრულდა. შენი ადგილი: მე-' || (new.data ->> 'place') || ' (' || (new.data ->> 'players') || '-დან)' end
-      when 'like' then 'მოიწონა შენი პოსტი' when 'reply' then 'გიპასუხა' when 'quote' then 'გაგიზიარა ციტატით'
-      when 'follow' then 'გამოგიწერა' when 'gift' then 'საჩუქარი გამოგიგზავნა'
-      when 'follow_request' then 'გამოწერას გთხოვს' when 'follow_accept' then 'დაგიდასტურა გამოწერა'
-      when 'achievement' then 'ახალი მიღწევა: ' || coalesce((select title from badges where key = new.data ->> 'badge'), '') || ' (+' || (new.data ->> 'coins') || ' ბროწეული)'
-      when 'invite_joined' then 'შენი მოწვევით შემოგვიერთდა 🎉 +20 ბროწეული'
-      when 'level_up' then 'ახალი დონე: ' || (new.data ->> 'level') || '! +' || (new.data ->> 'coins') || ' ბროწეული'
-      when 'listing_price' then 'შენახულ განცხადებას ფასი დაუკლეს: ' || public.price_text((new.data ->> 'price')::numeric, new.data ->> 'currency')
-      when 'match' then 'თქვენ ერთმანეთი მოიწონეთ!' when 'game_invite' then 'თამაშში გეპატიჟება'
-      when 'group_request' then 'ითხოვს გაწევრიანებას: ' || coalesce(v_group, 'ჯგუფი')
-      when 'group_approved' then 'მიგიღეს ჯგუფში: ' || coalesce(v_group, '')
-      when 'event_rsvp' then 'მოდის: ' || coalesce(v_event, 'შენს ივენთზე')
-      else 'ახალი შეტყობინება' end,
-    'url', case when new.type = 'game_invite' and new.game_id is not null then '/g/' || new.game_id
-                when new.tournament_id is not null then '/t/' || new.tournament_id
-                when new.type = 'match' then '/dating?tab=matches'
-                when new.type = 'follow_request' then '/requests'
-                when new.type = 'listing_price' then '/market/' || (new.data ->> 'listing_id')
-                when new.type in ('achievement', 'level_up') then '/rewards'
-                when new.group_id is not null then '/groups/' || (select slug from groups where id = new.group_id)
-                when new.event_id is not null then '/events/' || new.event_id
-                when new.post_id is not null then '/p/' || new.post_id else '/notifications' end,
-    'tag', 'n-' || new.type || '-' || coalesce(new.post_id::text, new.group_id::text, new.tournament_id::text, new.data ->> 'listing_id', new.actor_id::text, '')));
-  return new;
-end $$;
-
--- ---------------------------------------------------------------------
 -- v3 RLS
 -- ---------------------------------------------------------------------
 alter table public.groups enable row level security;
@@ -391,3 +196,219 @@ create table if not exists public.calls (
   check (caller_id <> callee_id)
 );
 create index if not exists calls_callee_idx on public.calls (callee_id, created_at desc);
+
+create or replace function public.before_call_insert()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if (select kind from conversations where id = new.conversation_id) not in ('dm', 'dating')
+     or not exists (select 1 from conversation_members where conversation_id = new.conversation_id and user_id = new.callee_id)
+     or not exists (select 1 from conversation_members where conversation_id = new.conversation_id and user_id = new.caller_id)
+     or public.is_blocked(new.caller_id, new.callee_id) then
+    raise exception 'ზარი ამ ჩატში შეუძლებელია';
+  end if;
+  new.status := 'ringing'; new.answered_at := null; new.ended_at := null; new.created_at := now();
+  return new;
+end $$;
+drop trigger if exists calls_before_insert on public.calls;
+create trigger calls_before_insert before insert on public.calls
+  for each row execute function public.before_call_insert();
+
+-- დაშვებული გადასვლები: ringing → accepted/declined/busy (პასუხისმგებელი), ringing → missed/ended (დამრეკი),
+-- accepted → ended (ორივე). დასრულებული ზარი აღარ იცვლება.
+create or replace function public.before_call_update()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_me uuid := auth.uid();
+begin
+  if old.status in ('declined', 'missed', 'ended', 'busy') then raise exception 'ზარი უკვე დასრულებულია'; end if;
+  new.id := old.id; new.conversation_id := old.conversation_id; new.caller_id := old.caller_id;
+  new.callee_id := old.callee_id; new.kind := old.kind; new.created_at := old.created_at;
+  if old.status = 'ringing' then
+    if new.status in ('accepted', 'declined', 'busy') and v_me is distinct from old.callee_id then raise exception 'not allowed'; end if;
+    if new.status = 'missed' and v_me is distinct from old.caller_id then raise exception 'not allowed'; end if;
+    if new.status = 'ended' and v_me is distinct from old.caller_id then raise exception 'not allowed'; end if;
+  elsif old.status = 'accepted' then
+    if new.status <> 'ended' then raise exception 'not allowed'; end if;
+  end if;
+  if new.status = 'accepted' then new.answered_at := now(); end if;
+  if new.status in ('declined', 'missed', 'ended', 'busy') then
+    new.ended_at := now();
+    if new.status = 'ended' and old.status = 'ringing' then new.status := 'missed'; end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists calls_before_update on public.calls;
+create trigger calls_before_update before update on public.calls
+  for each row execute function public.before_call_update();
+
+create or replace function public.after_call_change()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_caller text;
+begin
+  if tg_op = 'INSERT' then
+    select coalesce(nullif(full_name, ''), username) into v_caller from profiles where id = new.caller_id;
+    perform public.push_dispatch(new.callee_id, jsonb_build_object(
+      'title', coalesce(v_caller, 'ეზო'),
+      'body', case new.kind when 'video' then '📹 შემომავალი ვიდეოზარი' else '📞 შემომავალი ზარი' end,
+      'url', '/chat/' || new.conversation_id, 'tag', 'call-' || new.id));
+  elsif new.status in ('declined', 'missed', 'ended', 'busy') and old.status not in ('declined', 'missed', 'ended', 'busy') then
+    insert into messages (conversation_id, sender_id, body, meta) values (new.conversation_id, new.caller_id, '',
+      jsonb_build_object('call', jsonb_build_object('id', new.id, 'kind', new.kind, 'status', new.status,
+        'duration', case when new.answered_at is not null then extract(epoch from new.ended_at - new.answered_at)::int else 0 end)));
+  end if;
+  return new;
+end $$;
+drop trigger if exists calls_after_change on public.calls;
+create trigger calls_after_change after insert or update on public.calls
+  for each row execute function public.after_call_change();
+
+-- Push: ჯგუფური ჩატის სახელი; ზარის მესიჯს ცალკე push არ სჭირდება
+create or replace function public.on_message_push()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_sender text; v_member uuid; v_kind text; v_title text; v_text text;
+begin
+  if new.meta ? 'call' then return new; end if;
+  select coalesce(nullif(full_name, ''), username) into v_sender from profiles where id = new.sender_id;
+  select kind, title into v_kind, v_title from conversations where id = new.conversation_id;
+  v_text := case new.media_type when 'image' then '📷 ფოტო' when 'audio' then '🎙 ხმოვანი მესიჯი' else left(new.body, 140) end;
+  for v_member in
+    select user_id from conversation_members where conversation_id = new.conversation_id and user_id <> new.sender_id
+  loop
+    perform public.push_dispatch(v_member, jsonb_build_object(
+      'title', case when v_kind = 'group' then coalesce(v_title, 'ჯგუფური ჩატი') else coalesce(v_sender, 'ეზო') end,
+      'body', case when v_kind = 'group' then coalesce(v_sender, '') || ': ' || v_text else v_text end,
+      'url', '/chat/' || new.conversation_id,
+      'tag', 'conv-' || new.conversation_id));
+  end loop;
+  return new;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- v4 RLS + Realtime
+-- ---------------------------------------------------------------------
+alter table public.message_reactions enable row level security;
+alter table public.calls enable row level security;
+
+drop policy if exists "reactions read" on public.message_reactions;
+drop policy if exists "reactions own" on public.message_reactions;
+create policy "reactions read" on public.message_reactions for select to authenticated using (public.is_member(conversation_id));
+create policy "reactions own" on public.message_reactions for all to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid() and exists (select 1 from public.messages m where m.id = message_id and public.is_member(m.conversation_id)));
+
+drop policy if exists "calls read" on public.calls;
+drop policy if exists "calls start" on public.calls;
+drop policy if exists "calls update" on public.calls;
+create policy "calls read" on public.calls for select to authenticated using (auth.uid() in (caller_id, callee_id));
+create policy "calls start" on public.calls for insert to authenticated with check (caller_id = auth.uid() and public.can_act());
+create policy "calls update" on public.calls for update to authenticated using (auth.uid() in (caller_id, callee_id));
+
+do $$ begin
+  begin alter publication supabase_realtime add table public.message_reactions; exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.calls; exception when duplicate_object then null; end;
+end $$;
+-- წაშლილი მესიჯის სრული მონაცემი Realtime-ში
+alter table public.messages replica identity full;
+alter table public.message_reactions replica identity full;
+
+-- =====================================================================
+--  v5: ჯოკერის მაგიდები (4 ადგილი + კომპიუტერი), ბლიცი, ტურნირები (არენა)
+-- =====================================================================
+create or replace function public.seat_user(v_g public.games, p_seat text)
+returns uuid language sql immutable as $$
+  select case p_seat when 'a' then v_g.player_a when 'w' then v_g.player_a when 'b' then v_g.player_b
+    when 'c' then v_g.player_c when 'd' then v_g.player_d end;
+$$;
+
+-- მაგიდასთან დაჯდომა (მოწვევით ან ღია მაგიდაზე). სავსე მაგიდა თავისით იწყება.
+create or replace function public.svc_take_seat(p_user uuid, p_id uuid)
+returns text language plpgsql security definer set search_path = public as $$
+declare v_g games; v_seat text;
+begin
+  select * into v_g from games where id = p_id for update;
+  if not found or v_g.status <> 'waiting' then raise exception 'მაგიდა უკვე დაწყებულია'; end if;
+  if v_g.seats <= 2 then raise exception 'ეს თამაში ორ მოთამაშეზეა'; end if;
+  if p_user in (v_g.player_a, v_g.player_b, v_g.player_c, v_g.player_d) then return null; end if;
+  if not v_g.is_public and not (p_user = any (v_g.invites)) then raise exception 'მოწვევა არ გაქვს'; end if;
+  if public.is_blocked(v_g.player_a, p_user) then raise exception 'ამ მაგიდასთან ვერ დაჯდები'; end if;
+  v_seat := case when v_g.player_b is null then 'b' when v_g.player_c is null then 'c' when v_g.player_d is null then 'd' end;
+  if v_seat is null then raise exception 'მაგიდა სავსეა'; end if;
+  update games set
+    player_b = case when v_seat = 'b' then p_user else player_b end,
+    player_c = case when v_seat = 'c' then p_user else player_c end,
+    player_d = case when v_seat = 'd' then p_user else player_d end,
+    move_no = move_no + 1, updated_at = now()
+   where id = p_id returning * into v_g;
+  update game_hands set user_id = p_user where game_id = p_id and seat = v_seat;
+  if v_g.player_b is not null and v_g.player_c is not null and v_g.player_d is not null then
+    update games set status = 'active', turn = public.seat_user(v_g, v_g.state ->> 'turn'), updated_at = now() where id = p_id;
+  end if;
+  return v_seat;
+end $$;
+
+create or replace function public.svc_take_any_seat(p_user uuid, p_type text)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid;
+begin
+  select id into v_id from games
+   where type = p_type and status = 'waiting' and is_public and seats > 2
+     and p_user is distinct from player_a and p_user is distinct from player_b
+     and p_user is distinct from player_c and p_user is distinct from player_d
+     and (player_b is null or player_c is null or player_d is null)
+     and not public.is_blocked(player_a, p_user)
+   order by created_at
+   limit 1
+   for update skip locked;
+  if v_id is null then return null; end if;
+  perform public.svc_take_seat(p_user, v_id);
+  return v_id;
+end $$;
+
+create or replace function public.svc_leave_seat(p_user uuid, p_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_g games; v_seat text;
+begin
+  select * into v_g from games where id = p_id for update;
+  if not found or v_g.status <> 'waiting' then return; end if;
+  v_seat := case p_user when v_g.player_b then 'b' when v_g.player_c then 'c' when v_g.player_d then 'd' end;
+  if v_seat is null then return; end if;
+  update games set
+    player_b = case when v_seat = 'b' then null else player_b end,
+    player_c = case when v_seat = 'c' then null else player_c end,
+    player_d = case when v_seat = 'd' then null else player_d end,
+    move_no = move_no + 1, updated_at = now()
+   where id = p_id;
+  update game_hands set user_id = null where game_id = p_id and seat = v_seat;
+end $$;
+
+-- მრავალადგილიანი თამაშის დასრულება: Elo წყვილ-წყვილად მხოლოდ ადამიანებს შორის
+-- p_scores: {"<user_id>": ქულა}; მაგიდიდან წასულს ძალიან დაბალი ქულა აქვს
+create or replace function public.svc_finish_table(p_id uuid, p_winner uuid, p_result text, p_scores jsonb)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_g games; r record; o record; v_delta float; v_k float; v_n int; v_deltas jsonb := '{}'::jsonb;
+begin
+  select * into v_g from games where id = p_id for update;
+  if not found or v_g.status <> 'active' then return; end if;
+  update games set status = 'finished', winner = p_winner, result = p_result, turn = null, updated_at = now() where id = p_id;
+  insert into game_stats (user_id, type) select key::uuid, v_g.type from jsonb_each(p_scores) on conflict do nothing;
+  v_n := (select count(*) from jsonb_object_keys(p_scores));
+  if v_n >= 2 then
+    v_k := 32.0 / (v_n - 1);
+    for r in select s.key::uuid as uid, (s.value)::numeric as score, gs.rating
+               from jsonb_each(p_scores) s join game_stats gs on gs.user_id = s.key::uuid and gs.type = v_g.type loop
+      v_delta := 0;
+      for o in select s.key::uuid as uid, (s.value)::numeric as score, gs.rating
+                 from jsonb_each(p_scores) s join game_stats gs on gs.user_id = s.key::uuid and gs.type = v_g.type
+                where s.key::uuid <> r.uid loop
+        v_delta := v_delta + v_k * ((case when r.score > o.score then 1 when r.score = o.score then 0.5 else 0 end)
+          - 1.0 / (1 + power(10, (o.rating - r.rating) / 400.0)));
+      end loop;
+      v_deltas := v_deltas || jsonb_build_object(r.uid::text, round(v_delta));
+    end loop;
+  end if;
+  update game_stats gs set
+    rating = gs.rating + coalesce((v_deltas ->> gs.user_id::text)::int, 0),
+    wins = gs.wins + coalesce(gs.user_id = p_winner, false)::int,
+    draws = gs.draws + (p_result = 'jokerdraw')::int,
+    losses = gs.losses + (p_result <> 'jokerdraw' and not coalesce(gs.user_id = p_winner, false))::int
+   where gs.type = v_g.type and gs.user_id in (select key::uuid from jsonb_each(p_scores));
+end $$;

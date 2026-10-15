@@ -68,24 +68,7 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created after insert on auth.users
   for each row execute function public.handle_new_user();
 
--- მომხმარებელი ვერ შეცვლის მთვლელებს პირდაპირ
-create or replace function public.protect_profile_counters()
-returns trigger language plpgsql as $$
-begin
-  if current_user in ('authenticated', 'anon') then
-    new.followers_count := old.followers_count;
-    new.following_count := old.following_count;
-    new.posts_count := old.posts_count;
-    new.role := old.role;
-    new.banned_until := old.banned_until;
-    new.ban_reason := old.ban_reason;
-    new.invited_by := old.invited_by;
-  end if;
-  return new;
-end $$;
-drop trigger if exists profiles_protect on public.profiles;
-create trigger profiles_protect before update on public.profiles
-  for each row execute function public.protect_profile_counters();
+-- მომხმარებელი ვერ შეცვლის მთვლელებს, როლს და შეზღუდვას პირდაპირ — protect_profile_counters ფაილის ბოლოსაა (ეტაპი C)
 
 -- ---------------------------------------------------------------------
 -- ბლოკი და რეპორტი
@@ -470,3 +453,63 @@ begin
   end if;
   return v_id;
 end $$;
+
+drop function if exists public.my_conversations();
+create or replace function public.my_conversations()
+returns table (id uuid, kind text, updated_at timestamptz, last_message text, last_sender uuid, unread boolean, other jsonb,
+               title text, avatar_url text, my_role text, members_count bigint, members jsonb, last_sender_name text)
+language sql stable security definer set search_path = public as $$
+  select c.id, c.kind, c.updated_at, c.last_message, c.last_sender,
+    (c.last_sender is not null and c.last_sender <> auth.uid() and c.updated_at > m.last_read_at) as unread,
+    case when c.kind <> 'group' then
+      (select jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name,
+               'avatar_url', p.avatar_url, 'last_seen', p.last_seen)
+         from conversation_members o join profiles p on p.id = o.user_id
+        where o.conversation_id = c.id and o.user_id <> auth.uid() limit 1) end as other,
+    c.title, c.avatar_url, m.role,
+    (select count(*) from conversation_members x where x.conversation_id = c.id),
+    (select coalesce(jsonb_agg(jsonb_build_object('id', p.id, 'username', p.username, 'full_name', p.full_name, 'avatar_url', p.avatar_url)), '[]')
+       from (select p.* from conversation_members o join profiles p on p.id = o.user_id
+              where o.conversation_id = c.id and o.user_id <> auth.uid() order by o.user_id limit 3) p),
+    (select coalesce(nullif(split_part(full_name, ' ', 1), ''), username) from profiles where id = c.last_sender)
+  from conversations c
+  join conversation_members m on m.conversation_id = c.id and m.user_id = auth.uid()
+  where public.mfa_ok()
+  order by c.updated_at desc;
+$$;
+
+create or replace function public.mark_read(p_conv uuid)
+returns void language sql security definer set search_path = public as $$
+  update conversation_members set last_read_at = now()
+  where conversation_id = p_conv and user_id = auth.uid();
+$$;
+
+-- ---------------------------------------------------------------------
+-- გაცნობა (Tinder + Badoo) — მხოლოდ 18+
+-- ---------------------------------------------------------------------
+create table if not exists public.dating_profiles (
+  user_id uuid primary key references public.profiles on delete cascade,
+  enabled boolean not null default true,
+  birth_date date not null,
+  gender text not null check (gender in ('man', 'woman')),
+  looking_for text not null default 'everyone' check (looking_for in ('man', 'woman', 'everyone')),
+  bio text not null default '' check (char_length(bio) <= 500),
+  photos jsonb not null default '[]'::jsonb,
+  interests text[] not null default '{}',
+  city text not null default '',
+  age_min int not null default 18 check (age_min >= 18),
+  age_max int not null default 60 check (age_max <= 99),
+  created_at timestamptz not null default now()
+);
+
+create or replace function public.check_dating_age()
+returns trigger language plpgsql as $$
+begin
+  if new.birth_date > (current_date - interval '18 years')::date then
+    raise exception 'გაცნობის რეჟიმი მხოლოდ 18 წლიდანაა';
+  end if;
+  return new;
+end $$;
+drop trigger if exists dating_age on public.dating_profiles;
+create trigger dating_age before insert or update on public.dating_profiles
+  for each row execute function public.check_dating_age();

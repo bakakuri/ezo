@@ -2,6 +2,7 @@
 # ლოკალური Supabase (Auth + PostgREST + Storage + game ფუნქცია) და მასზე ორი შემოწმება:
 #   1) API-ს შემოწმება: აპის და Edge Function-ების ყველა მოთხოვნა რეალურ PostgREST-ზე (scripts/api-check/check.mjs)
 #   2) კონტრაქტის ტესტი: აპის api.supabase.js სამი მომხმარებლით — რეგისტრაციიდან ანგარიშის წაშლამდე (contract.mjs)
+#   3) წერილები: ჩვენი ქართული შაბლონები ნამდვილ Auth-ში, ლოკალურ SMTP-ზე (emails.mjs)
 # საჭიროა: Postgres (superuser, PG* ცვლადები), psql, node 20+, curl, tar/xz და npm install.
 # გაშვება: PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres bash scripts/real-stack/run.sh
 set -euo pipefail
@@ -88,6 +89,9 @@ PGRST_URL="http://localhost:$PGRST_PORT" node scripts/api-check/check.mjs \
   --app src/lib/api.supabase.js --server supabase/functions/game/index.ts supabase/functions/push/index.ts || status=1
 
 echo "== კონტრაქტის ტესტი"
-node scripts/real-stack/contract.mjs "$W" || status=1
+SUPABASE_URL="http://localhost:$GATEWAY_PORT" node scripts/real-stack/contract.mjs "$W" || status=1
+
+echo "== ქართული წერილები (დადასტურება, აღდგენა, 2FA, ელფოსტის შეცვლა…)"
+SERVICE_KEY="$SERVICE_KEY" node scripts/real-stack/emails.mjs "$W" || status=1
 
 exit $status

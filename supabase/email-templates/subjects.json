@@ -1,0 +1,42 @@
+{
+  "confirmation": {
+    "name": "Confirm sign up",
+    "subject": "დაადასტურე ელფოსტა ეზოში"
+  },
+  "invite": {
+    "name": "Invite user",
+    "subject": "გეპატიჟებიან ეზოში"
+  },
+  "magic_link": {
+    "name": "Magic link",
+    "subject": "შესვლა ეზოში"
+  },
+  "email_change": {
+    "name": "Change email address",
+    "subject": "დაადასტურე ახალი ელფოსტა"
+  },
+  "recovery": {
+    "name": "Reset password",
+    "subject": "პაროლის აღდგენა ეზოში"
+  },
+  "reauthentication": {
+    "name": "Reauthentication",
+    "subject": "დადასტურების კოდი ეზოსთვის"
+  },
+  "password_changed_notification": {
+    "name": "Password changed",
+    "subject": "ეზოს პაროლი შეიცვალა"
+  },
+  "email_changed_notification": {
+    "name": "Email address changed",
+    "subject": "ეზოს ელფოსტა შეიცვალა"
+  },
+  "mfa_factor_enrolled_notification": {
+    "name": "Verification method added",
+    "subject": "ორფაქტორიანი შესვლა ჩაირთო"
+  },
+  "mfa_factor_unenrolled_notification": {
+    "name": "Verification method removed",
+    "subject": "ორფაქტორიანი შესვლა გამოირთო"
+  }
+}

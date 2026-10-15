@@ -3,6 +3,7 @@
 import { art } from './demoArt.js'
 import { groupStories } from './groupStories.js'
 import { demoMarket } from './demoMarket.js'
+import { skeleton, matches } from './translit.js'
 import { demoRewards } from './demoRewards.js'
 import { GIFT_PRICES } from './rewards.js'
 import { BOTS } from '../games/bots.js'
@@ -19,7 +20,7 @@ const wait = (ms = 120) => new Promise((r) => setTimeout(r, ms))
 
 const people = [
   { id: 'me', username: 'giorgi', full_name: 'გიორგი', bio: 'ვაწყობ ეზოს. ნარდში არ დამიჯერო.', city: 'თბილისი', school: 'ქუთაისის მე-2 საჯარო სკოლა', grad_year: 2012, role: 'admin' },
-  { id: 'u1', username: 'nino.b', full_name: 'ნინო ბერიძე', bio: 'ფოტოგრაფი · მთები და ძველი თბილისი', city: 'თბილისი', school: 'ქუთაისის მე-2 საჯარო სკოლა', grad_year: 2012 },
+  { id: 'u1', username: 'nino.b', full_name: 'ნინო ბერიძე', bio: 'ფოტოგრაფი · მთები და ძველი თბილისი', city: 'თბილისი', school: 'ქუთაისის მე-2 საჯარო სკოლა', grad_year: 2012, verified: true },
   { id: 'u2', username: 'luka_j', full_name: 'ლუკა ჯაფარიძე', bio: 'ჭადრაკი 1900+. მოდი, ვითამაშოთ.', city: 'ქუთაისი', school: 'ქუთაისის მე-2 საჯარო სკოლა', grad_year: 2013 },
   { id: 'u3', username: 'ana.lomidze', full_name: 'ანა ლომიძე', bio: 'ღვინო, წიგნები, ზღვა.', city: 'ბათუმი', school: 'ბათუმის მე-6 სკოლა', grad_year: 2015, is_private: true },
   { id: 'u4', username: 'dato.tsereteli', full_name: 'დათო წერეთელი', bio: 'მოგზაური. სვანეთი ჩემი მეორე სახლია.', city: 'თბილისი', school: '', grad_year: null },
@@ -33,7 +34,7 @@ const profiles = new Map(people.map((p, i) => [p.id, {
 }]))
 const person = (id) => {
   const p = profiles.get(id)
-  return p && { id: p.id, username: p.username, full_name: p.full_name, avatar_url: p.avatar_url, last_seen: p.last_seen }
+  return p && { id: p.id, username: p.username, full_name: p.full_name, avatar_url: p.avatar_url, last_seen: p.last_seen, verified: Boolean(p.verified) }
 }
 
 const follows = new Set(['me>u1', 'me>u2', 'me>u5', 'u1>me', 'u2>me', 'u3>me', 'u4>u1', 'u5>u1', 'u6>u1', 'u7>u2', 'u1>u5'])
@@ -350,6 +351,9 @@ const demoMfa = { enabled: false, verified: true }
 // მოწვევა მხოლოდ ერთხელ და მხოლოდ ახალ ანგარიშზე (როგორც claim_invite სერვერზე)
 const demoInvite = { fresh: false, by: null }
 const bannedWords = ['კაზინო']
+const dismissed = new Set()
+const notifPrefs = { value: null }
+const drafts = [{ id: 'dr1', user_id: 'me', body: 'ხვალ ვაკის პარკში ნარდის ტურნირია — ვინ მოდის? #ნარდი', poll: null, group_id: null, created_at: ago(300), updated_at: ago(45) }]
 // შეცდომების ჟურნალის მაგალითები (ახალი ჩანაწერები ზემოთ)
 const clientErrors = [
   ...[12, 40, 95].map((m, i) => ({ message: 'PGRST200: Could not find a relationship between \'posts\' and \'posts\' in the schema cache', stack: 'Searched for a foreign key relationship between \'posts\' and \'posts\' using the hint \'posts_quote_id_fkey\'',
@@ -595,7 +599,10 @@ export const api = {
       else if (tab === 'media') list = list.filter((p) => p.media.length)
       else list = list.filter((p) => p.kind === 'post')
     }
-    return list.sort((a, b) => b.created_at.localeCompare(a.created_at)).map(enrich)
+    list = list.sort((a, b) => b.created_at.localeCompare(a.created_at)).map(enrich)
+    const pid = profiles.get(userId)?.pinned_post_id
+    const pinned = tab === 'posts' && pid && list.find((p) => p.id === pid)
+    return pinned ? [{ ...pinned, pinned: true }, ...list.filter((p) => p.id !== pid)] : list
   },
 
   async relation(id) {
@@ -651,12 +658,24 @@ export const api = {
       .map((f) => (which === 'followers' ? f.split('>')[0] : f.split('>')[1]))
     return ids.map((x) => ({ ...person(x), bio: profiles.get(x).bio }))
   },
-  async search(q) {
-    await wait(120)
-    const t = q.trim().toLowerCase()
-    if (!t) return []
-    return [...profiles.values()].filter((p) => p.username.includes(t) || p.full_name.toLowerCase().includes(t))
+  async searchAll(q) {
+    await wait(140)
+    const empty = { people: [], posts: [], tags: [], groups: [], listings: [] }
+    if (skeleton(q.trim().replace(/^[#@]+/, '')).length < 2) return empty
+    const people = [...profiles.values()].filter((p) => p.onboarded && matches(`${p.full_name} ${p.username}`, q))
+      .sort((a, b) => b.followers_count - a.followers_count).slice(0, 20)
+      .map((p) => ({ ...person(p.id), city: p.city, followers_count: p.followers_count }))
+    const found = posts.filter((p) => !p.parent_id && !p.hidden && canSee(p.group_id) && canSeeAuthor(p.author_id) && matches(p.body, q))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 20).map(enrich)
+    const counts = new Map()
+    for (const p of posts) if (!p.hidden && canSee(p.group_id)) for (const t of p.hashtags || []) if (skeleton(t).startsWith(skeleton(q.trim().replace(/^[#@]+/, '')))) counts.set(t, (counts.get(t) || 0) + 1)
+    const tags = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([tag, n]) => ({ tag, posts: n }))
+    const gs = groups.filter((g) => matches(g.name, q)).slice(0, 8).map((g) => ({ id: g.id, slug: g.slug, name: g.name, cover_url: g.cover_url, privacy: g.privacy, members_count: memberships.filter((m) => m[0] === g.id && m[2] !== 'pending').length }))
+    const listings = market.listings.filter((l) => !l.hidden && l.status !== 'sold' && matches(l.title, q)).slice(0, 8)
+      .map((l) => ({ id: l.id, title: l.title, price: l.price, currency: l.currency, city: l.city, photo: l.thumb || l.photos?.[0] }))
+    return { people, posts: found, tags, groups: gs, listings }
   },
+  async search(q) { return (await this.searchAll(q)).people },
   async classmates({ school, year, city }) {
     await wait(150)
     return [...profiles.values()].filter((p) => p.id !== ME &&
@@ -664,8 +683,39 @@ export const api = {
       (!year || p.grad_year === Number(year)) &&
       (!city || p.city.includes(city.trim())))
   },
-  async suggested() {
-    return [...profiles.values()].filter((p) => p.id !== ME && !follows.has(`${ME}>${p.id}`))
+  async suggested(limit = 12) {
+    const me = profiles.get(ME)
+    const mine = [...follows].filter((f) => f.startsWith(`${ME}>`)).map((f) => f.split('>')[1])
+    return [...profiles.values()].filter((p) => p.id !== ME && !follows.has(`${ME}>${p.id}`) && !dismissed.has(p.id) && !p.banned_until)
+      .map((p) => {
+        const viaIds = mine.filter((m) => follows.has(`${m}>${p.id}`))
+        const followsMe = follows.has(`${p.id}>${ME}`)
+        const sameSchool = me.school && p.school?.toLowerCase() === me.school.toLowerCase()
+        const classmate = sameSchool && p.grad_year === me.grad_year
+        const sameCity = me.city && p.city === me.city
+        const score = (followsMe ? 100 : 0) + (classmate ? 40 : sameSchool ? 25 : 0) + Math.min(viaIds.length, 10) * 8 + (sameCity ? 8 : 0) + Math.log(1 + p.followers_count)
+        const reason = followsMe ? 'follows_you' : classmate ? 'classmate' : viaIds.length ? 'mutual' : sameSchool ? 'school' : sameCity ? 'city' : 'popular'
+        return { ...person(p.id), city: p.city, school: p.school, grad_year: p.grad_year, followers_count: p.followers_count, reason, mutual: viaIds.length, via: viaIds[0] ? profiles.get(viaIds[0]).full_name : null, score }
+      })
+      .sort((a, b) => b.score - a.score).slice(0, limit).map(({ score, ...x }) => x)
+  },
+  async dismissSuggestion(id) { dismissed.add(id) },
+
+  async drafts() { return [...drafts].sort((a, b) => b.updated_at.localeCompare(a.updated_at)) },
+  async saveDraft({ id = null, body = '', poll = null, group_id = null }) {
+    const now = new Date().toISOString()
+    const d = id && drafts.find((x) => x.id === id)
+    if (d) { Object.assign(d, { body, poll, group_id, updated_at: now }); return d }
+    if (drafts.length >= 50) throw new Error('მონახაზი მაქსიმუმ 50 შეიძლება — ძველები წაშალე')
+    const nd = { id: nid('dr'), user_id: ME, body, poll, group_id, created_at: now, updated_at: now }
+    drafts.push(nd)
+    return nd
+  },
+  async deleteDraft(id) { const i = drafts.findIndex((x) => x.id === id); if (i >= 0) drafts.splice(i, 1) },
+  async pinPost(id) {
+    const p = id && posts.find((x) => x.id === id)
+    if (id && (!p || p.author_id !== ME || p.parent_id || p.group_id)) throw new Error('ამ პოსტს პროფილზე ვერ მიამაგრებ')
+    profiles.get(ME).pinned_post_id = id || null
   },
 
   async stories() {
@@ -1162,6 +1212,28 @@ export const api = {
     if (p) { p.banned_until = days ? new Date(Date.now() + days * 864e5).toISOString() : 'infinity'; p.ban_reason = note }
   },
   async adminUnban(userId) { const p = profiles.get(userId); if (p) { p.banned_until = null; p.ban_reason = null } },
+  async adminSetVerified(userId, on) { const p = profiles.get(userId); if (p) p.verified = Boolean(on) },
+  async adminAnalytics(days = 30) {
+    await wait(160)
+    const n = Math.max(7, Math.min(days, 180))
+    // სადემონსტრაციო რიგები: ნელი ზრდა, შაბათ-კვირას მეტი აქტიურობა
+    const wave = (i, seed) => Math.abs(Math.sin(i * 12.9898 + seed) * 43758.5453) % 1
+    const out = []
+    for (let k = n - 1; k >= 0; k--) {
+      const day = new Date(Date.now() - k * 864e5)
+      const t = 180 - k
+      const weekend = [0, 6].includes(day.getDay()) ? 1.25 : 1
+      const active = Math.round((40 + t * 0.9) * weekend * (0.85 + wave(t, 1) * 0.3))
+      out.push({ day: day.toISOString().slice(0, 10), active, signups: Math.round((3 + t * 0.05) * (0.5 + wave(t, 2))),
+        posts: Math.round(active * (0.35 + wave(t, 3) * 0.2)), replies: Math.round(active * 0.5 * wave(t, 4)),
+        messages: Math.round(active * (2.2 + wave(t, 5))), games: Math.round(active * (0.4 + wave(t, 6) * 0.3)) })
+    }
+    const sum = (k, a = out) => a.reduce((s, d) => s + d[k], 0)
+    return { days: out, totals: { users: profiles.size + 214, dau: out.at(-1).active, wau: Math.round(out.at(-1).active * 2.6), mau: Math.round(out.at(-1).active * 5.1),
+      signups: sum('signups'), signups_prev: Math.round(sum('signups') * 0.82), posts: sum('posts'), posts_prev: Math.round(sum('posts') * 0.9), retention_7d: 41 } }
+  },
+  async notificationPrefs() { return notifPrefs.value },
+  async saveNotificationPrefs(patch) { notifPrefs.value = { ...(notifPrefs.value || {}), ...patch }; return notifPrefs.value },
 
   async logError(e) { clientErrors.unshift({ ...e, user_id: ME, created_at: new Date().toISOString() }) },
   async adminErrors(days = 7) {

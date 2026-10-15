@@ -1,4 +1,4 @@
-import { lazy as reactLazy, Suspense } from 'react'
+import { lazy as reactLazy, Suspense, useEffect } from 'react'
 import { RouterProvider, useLocation, match } from './lib/router.jsx'
 import { AuthProvider, useAuth } from './lib/auth.jsx'
 import { ToastProvider } from './components/Toast.jsx'
@@ -51,7 +51,9 @@ const SocialMod = () => import('./pages/Social.jsx')
 const Saved = lazy(() => SocialMod().then((m) => ({ default: m.Saved })))
 const FollowRequests = lazy(() => SocialMod().then((m) => ({ default: m.FollowRequests })))
 const CloseFriends = lazy(() => SocialMod().then((m) => ({ default: m.CloseFriends })))
-const Settings = lazy(() => import('./pages/Settings.jsx'))
+const SettingsMod = () => import('./pages/Settings.jsx')
+const Settings = lazy(SettingsMod)
+const NotificationSettings = lazy(() => SettingsMod().then((m) => ({ default: m.NotificationSettings })))
 const Admin = lazy(() => import('./pages/Admin.jsx'))
 const GroupsMod = () => import('./pages/Groups.jsx')
 const Groups = lazy(GroupsMod)
@@ -67,6 +69,11 @@ const MarketMod = () => import('./pages/Market.jsx')
 const Market = lazy(MarketMod)
 const ListingPage = lazy(() => MarketMod().then((m) => ({ default: m.ListingPage })))
 const ListingForm = lazy(() => MarketMod().then((m) => ({ default: m.ListingForm })))
+const LegalMod = () => import('./pages/Legal.jsx')
+const Privacy = lazy(() => LegalMod().then((m) => ({ default: m.Privacy })))
+const Terms = lazy(() => LegalMod().then((m) => ({ default: m.Terms })))
+// შესვლის გარეშეც ხელმისაწვდომი გვერდები
+const PUBLIC = { '/privacy': () => <Privacy />, '/terms': () => <Terms /> }
 
 // მოწვევის ბმულით მოსული (ჯერ შესული არ არის) — დავიმახსოვროთ, რეგისტრაციის შემდეგ გამოვიყენებთ
 {
@@ -96,6 +103,7 @@ const ROUTES = [
   ['/requests', () => <FollowRequests />],
   ['/close-friends', () => <CloseFriends />],
   ['/settings', () => <Settings />],
+  ['/settings/notifications', () => <NotificationSettings />],
   ['/admin', () => <Admin />],
   ['/groups', () => <Groups />],
   ['/groups/:slug', (p) => <GroupPage key={p.slug} slug={p.slug} />],
@@ -109,6 +117,8 @@ const ROUTES = [
   ['/market/new', () => <ListingForm />],
   ['/market/:id', (p) => <ListingPage key={p.id} id={p.id} />],
   ['/market/:id/edit', (p) => <ListingForm key={p.id} id={p.id} />],
+  ['/privacy', () => <Privacy />],
+  ['/terms', () => <Terms />],
 ]
 
 function Routes() {
@@ -139,8 +149,18 @@ function Routes() {
 
 function Gate() {
   const { loading, session, me, recovery, mfa } = useAuth()
+  const { path } = useLocation()
+  // ამ მოწყობილობაზე უკვე შესულა — სტუმრის გვერდზე „შესვლა“ წინ იქნება
+  useEffect(() => { if (session) try { localStorage.setItem('ezo.returning', '1') } catch { /* */ } }, [session])
   if (loading) return <Loader />
   if (recovery && session) return <NewPassword />
+  if (!session && PUBLIC[path]) {
+    return (
+      <main className="main full">
+        <ErrorBoundary resetKey={path}><Suspense fallback={<Loader />}>{PUBLIC[path]()}</Suspense></ErrorBoundary>
+      </main>
+    )
+  }
   if (!session) return <AuthPage />
   if (mfa) return <MfaPrompt />
   if (!me) return <Loader />

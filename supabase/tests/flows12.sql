@@ -76,3 +76,20 @@ select count(*) as kept_after_delete, count(user_id) as user_cleared from client
 do $$ begin
   if (select count(*) from client_errors where message like 'PGRST200%' and user_id is null) <> 1 then raise exception 'user not cleared'; end if;
 end $$;
+
+-- sitemap: მხოლოდ საჯარო
+insert into auth.users (id, email) values ('c1e00000-0000-0000-0000-00000000000e','e@x'), ('c1f00000-0000-0000-0000-00000000000f','f@x');
+update profiles set onboarded = true, username = 'openuser' where id = 'c1e00000-0000-0000-0000-00000000000e';
+update profiles set onboarded = true, username = 'closeduser', is_private = true where id = 'c1f00000-0000-0000-0000-00000000000f';
+update profiles set username = 'banneduser', banned_until = now() + interval '1 day' where id = 'c1b00000-0000-0000-0000-00000000000b';
+insert into listings (seller_id, title, price, currency, category, condition, city) values ('c1e00000-0000-0000-0000-00000000000e', 'ველოსიპედი', 100, 'GEL', 'hobby', 'used', 'თბილისი');
+insert into listings (seller_id, title, price, currency, category, condition, city, status) values ('c1e00000-0000-0000-0000-00000000000e', 'გაყიდული', 100, 'GEL', 'hobby', 'used', 'თბილისი', 'sold');
+select set_config('request.jwt.claim.sub', '', false);
+set role anon;
+select public.sitemap_entries() -> 'u' as users, jsonb_array_length(public.sitemap_entries() -> 'm') as listings;
+do $$ declare s jsonb := public.sitemap_entries(); begin
+  if not (s -> 'u') ? 'openuser' then raise exception 'open user missing'; end if;
+  if (s -> 'u') ? 'closeduser' or (s -> 'u') ? 'banneduser' then raise exception 'private or banned user listed: %', s -> 'u'; end if;
+  if jsonb_array_length(s -> 'm') <> 1 then raise exception 'listings: %', s -> 'm'; end if;
+end $$;
+reset role;

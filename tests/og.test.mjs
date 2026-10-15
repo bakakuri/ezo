@@ -23,7 +23,8 @@ test('og: handler without Supabase env renders the generic card', async () => {
 
 test('vercel.json sends only bots to the OG function and keeps the SPA fallback', () => {
   const cfg = JSON.parse(readFileSync(new URL('../vercel.json', import.meta.url), 'utf8'))
-  const [bots, spa] = cfg.rewrites
+  const bots = cfg.rewrites.find((r) => r.destination.startsWith('/api/og'))
+  const spa = cfg.rewrites.at(-1)
   assert.equal(bots.destination, '/api/og?path=/:kind/:key')
   assert.ok(new RegExp(bots.has[0].value).test('facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'))
   assert.ok(!new RegExp(bots.has[0].value).test('Mozilla/5.0 (Linux; Android 14) Chrome/128 Mobile Safari/537.36'))

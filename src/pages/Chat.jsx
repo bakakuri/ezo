@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Avatar, Empty, Loader, PersonRow, Sheet, TopBar, ConfirmSheet } from '../components/ui.jsx'
+import { Avatar, Empty, Loader, PersonRow, Sheet, TopBar, ConfirmSheet, Verified } from '../components/ui.jsx'
 import { Icon } from '../components/Icon.jsx'
 import { api } from '../lib/api.js'
 import { useAuth } from '../lib/auth.jsx'
@@ -292,7 +292,7 @@ export function ChatRoom({ id }) {
           <Link to={`/u/${other.username}`} className="hstack grow" style={{ minWidth: 0 }}>
             <Avatar user={other} size={36} online />
             <div style={{ minWidth: 0 }}>
-              <b className="ellipsis" style={{ display: 'block' }}>{other.full_name || other.username}</b>
+              <b className="ellipsis" style={{ display: 'block' }}>{other.full_name || other.username}<Verified user={other} size={14} /></b>
               <span className="xs faint">{typing ? 'წერს…' : seenText(other.last_seen) || (conv.kind === 'dating' ? 'გაცნობა' : `@${other.username}`)}</span>
             </div>
           </Link>
