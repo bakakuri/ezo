@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  app:
+    name: ტესტები და აწყობა
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - name: Unit ტესტები (ძრავები, თამაშის სერვერი, ჯილდოები, ამოცანები, QR, OG)
+        run: npm test
+      - name: game ფუნქციის ფაილი წყაროს შეესაბამება
+        run: npm run build:functions && git diff --exit-code supabase/functions/game/index.ts
+      - name: აწყობა (დემო რეჟიმი)
+        run: npm run build
+        env:
+          VITE_DEMO: '1'
+
+  database:
+    name: SQL სქემა და RLS
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: სქემა სუფთა ბაზაზე (ორჯერ) და ყველა SQL ტესტი
+        run: bash scripts/sql-tests.sh
