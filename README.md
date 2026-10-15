@@ -99,8 +99,8 @@ push-ის შემდეგ Vercel თავისით აწყობს �
 **2.4 სქემა.** SQL Editor → **New query** → ჩასვი `supabase/schema.sql` მთლიანად → **Run**.
 - ტელეფონზე მარტივად დასაკოპირებლად: Chrome-ში გახსენი `github.com/bakakuri/ezo/blob/main/supabase/schema.sql`
   და დააჭირე **Copy raw file** (ორი კვადრატის ხატულა ფაილის თავზე).
-- თუ მთლიანი ფაილი არ ჩაჯდა ან ბრაუზერი გაიჭედა — გაუშვი ნაწილებად, თანმიმდევრობით, თითო ახალ query-ში:
-  `supabase/parts/schema-1.sql` → `schema-2.sql` → `schema-3.sql` → `schema-4.sql`.
+- თუ მთლიანი ფაილი არ ჩაჯდა ან ბრაუზერი გაიჭედა — გაუშვი 8 ნაწილად, თანმიმდევრობით, თითო ახალ query-ში:
+  `supabase/parts/schema-1.sql` → `schema-2.sql` → … → `schema-8.sql` (თითო ~23 ათასი სიმბოლო).
 - თუ გამოვა გაფრთხილება „destructive operation“ — ეს ფაილის `drop policy if exists`-ებია, დააჭირე **Run this query**.
 - შედეგი: „Success. No rows returned“. Table Editor-ში გამოჩნდება ცხრილები (profiles, posts, games…).
 - ფაილი ხელახლა გაშვებადია: ყოველი ახალი ვერსიის შემდეგ უბრალოდ ისევ გაუშვი (მონაცემებს არ შლის).
@@ -195,7 +195,7 @@ supabase/schema.sql      ცხრილები, RLS, ტრიგერებ
 supabase/functions/      Edge Functions: game (თამაშის სერვერი), push
 supabase/functions-src/  game-ის წყარო; აწყობა: npm run build:functions
 supabase/tests/          SQL ტესტები (RLS, ტრიგერები, RPC-ები) — npm run test:sql
-supabase/parts/          schema.sql 4 ნაწილად ტელეფონიდან ჩასასმელად (node scripts/split-schema.mjs)
+supabase/parts/          schema.sql 8 ნაწილად ტელეფონიდან ჩასასმელად (node scripts/split-schema.mjs)
 api/og.js                Vercel ფუნქცია: ბმულის ბარათები სოციალური ქსელების რობოტებისთვის
 .github/workflows/ci.yml GitHub Actions: ტესტები, თამაშის ფუნქციის შემოწმება, აწყობა, SQL ტესტები Postgres-ზე
 src/games/               თამაშების ძრავები (სუფთა JS, ტესტებით) + კომპიუტერი-მოწინააღმდეგე

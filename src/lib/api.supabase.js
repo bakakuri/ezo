@@ -4,11 +4,13 @@ import { withMyHand, HIDDEN } from '../games/server.js'
 
 // Supabase-ზე მომუშავე API. ინტერფეისი ზუსტად ემთხვევა api.demo.js-ს.
 
+// თავის თავზე მიბმული კავშირები (ციტატა, პასუხი): PostgREST-ში მხოლოდ სვეტით (quote:quote_id) — კავშირის სახელს ვერ პოულობს,
+// posts!quote_id კი საპირისპირო მიმართულებას (სიას) აბრუნებს
 const PERSON = 'id,username,full_name,avatar_url,last_seen'
 const POST = `*, author:profiles!posts_author_id_fkey(${PERSON}),
-  quote:posts!posts_quote_id_fkey(id,body,media,created_at,author:profiles!posts_author_id_fkey(${PERSON})),
+  quote:quote_id(id,body,media,created_at,author:profiles!posts_author_id_fkey(${PERSON})),
   group:groups!posts_group_id_fkey(id,slug,name,privacy), poll:polls(*)`
-const MSG = `*, reply:messages!messages_reply_to_fkey(id,body,sender_id,media_type,deleted_at), reactions:message_reactions(user_id,emoji)`
+const MSG = `*, reply:reply_to(id,body,sender_id,media_type,deleted_at), reactions:message_reactions(user_id,emoji)`
 const GROUP = 'id,slug,name,description,cover_url,privacy,owner_id,members_count,created_at'
 const EVENT = `*, host:profiles!events_host_id_fkey(${PERSON}), group:groups!events_group_id_fkey(id,slug,name)`
 const LISTING = `*, seller:profiles!listings_seller_id_fkey(${PERSON},city)`
