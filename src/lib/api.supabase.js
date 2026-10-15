@@ -18,7 +18,39 @@ const GAME = `*, a:profiles!games_player_a_fkey(${PERSON}), b:profiles!games_pla
   c:profiles!games_player_c_fkey(${PERSON}), d:profiles!games_player_d_fkey(${PERSON})`
 
 let me = null
-const typingChannels = new Map()
+
+// ---- Realtime არხები
+// supabase-js იმავე სახელის არხს მეორედ არ ქმნის — უკვე გამოწერილს აბრუნებს, და მასზე .on('postgres_changes' | 'presence')
+// შეცდომას აგდებს; დახურვისას კი ყველა იმავე სახელის არხს შლის. ამიტომ:
+// 1) ბაზის ცვლილებების არხებს სახელი სხვასთან არ უნდა დაემთხვეს — ყოველ გამოწერას უნიკალურ სახელს ვაძლევთ;
+let chanSeq = 0
+const pgChannel = (name) => sb.channel(`${name}:${Date.now().toString(36)}${(++chanSeq).toString(36)}`)
+// 2) broadcast/presence არხებს (ტიპინი, მაყურებლები) სახელი ორივე მხარეს ერთი სჭირდება — ერთ არხს ყველა გამომწერი იზიარებს,
+//    ბოლოს წასულის შემდეგ კი ცოტა ხანს ღიაა, რომ სწრაფად დაბრუნებულმა იგივე გააგრძელოს.
+const sharedChannels = new Map()
+function joinShared(name, opts, init) {
+  let s = sharedChannels.get(name)
+  if (s) {
+    clearTimeout(s.closing)
+    s.closing = null
+  } else {
+    s = { ch: sb.channel(name, opts), subs: new Set(), closing: null, joined: false }
+    sharedChannels.set(name, s)
+    init(s)
+  }
+  return s
+}
+function leaveShared(name, sub, onIdle) {
+  const s = sharedChannels.get(name)
+  if (!s) return
+  s.subs.delete(sub)
+  if (s.subs.size || s.closing) return
+  onIdle?.(s)
+  s.closing = setTimeout(() => {
+    sharedChannels.delete(name)
+    sb.removeChannel(s.ch)
+  }, 20000)
+}
 
 async function gameFn(body) {
   const { data, error } = await sb.functions.invoke('game', { body })
@@ -362,7 +394,7 @@ export const api = {
     return { notifications: n.count || 0, messages: (convs.data || []).filter((c) => c.unread).length }
   },
   subscribeNotifications(cb) {
-    const ch = sb.channel(`notif:${uid()}`)
+    const ch = pgChannel(`notif:${uid()}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${uid()}` }, (p) => cb(p.new))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, () => cb(null))
       .subscribe()
@@ -389,7 +421,7 @@ export const api = {
   },
   // მოვლენები: { kind: 'message:new' | 'message:update' | 'reaction:set' | 'reaction:remove', row }
   subscribeMessages(convId, cb) {
-    const ch = sb.channel(`conv:${convId}`)
+    const ch = pgChannel(`conv:${convId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${convId}` }, (p) => cb({ kind: 'message:new', row: p.new }))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `conversation_id=eq.${convId}` }, (p) => cb({ kind: 'message:update', row: p.new }))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'message_reactions', filter: `conversation_id=eq.${convId}` }, (p) => {
@@ -417,7 +449,7 @@ export const api = {
     ok(await sb.from('calls').update({ status }).eq('id', id))
   },
   onIncomingCall(cb) {
-    const ch = sb.channel(`calls-in:${uid()}`)
+    const ch = pgChannel(`calls-in:${uid()}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'calls', filter: `callee_id=eq.${uid()}` }, async (p) => {
         const caller = ok(await sb.from('profiles').select(PERSON).eq('id', p.new.caller_id).maybeSingle())
         cb({ ...p.new, caller })
@@ -426,7 +458,7 @@ export const api = {
     return () => sb.removeChannel(ch)
   },
   onCallChange(id, cb) {
-    const ch = sb.channel(`call-row:${id}`)
+    const ch = pgChannel(`call-row:${id}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'calls', filter: `id=eq.${id}` }, (p) => cb(p.new))
       .subscribe()
     return () => sb.removeChannel(ch)
@@ -450,14 +482,17 @@ export const api = {
     await sb.rpc('mark_read', { p_conv: convId })
   },
   subscribeTyping(convId, cb) {
-    const ch = sb.channel(`typing:${convId}`, { config: { broadcast: { self: false } } })
-      .on('broadcast', { event: 'typing' }, ({ payload }) => { if (payload.user !== uid()) cb(payload.on) })
-      .subscribe()
-    typingChannels.set(convId, ch)
-    return () => { typingChannels.delete(convId); sb.removeChannel(ch) }
+    const name = `typing:${convId}`
+    const s = joinShared(name, { config: { broadcast: { self: false } } }, (sh) => {
+      sh.ch.on('broadcast', { event: 'typing' }, ({ payload }) => {
+        if (payload.user !== uid()) sh.subs.forEach((f) => f(payload.on))
+      }).subscribe()
+    })
+    s.subs.add(cb)
+    return () => leaveShared(name, cb)
   },
   sendTyping(convId, isOn) {
-    typingChannels.get(convId)?.send({ type: 'broadcast', event: 'typing', payload: { user: uid(), on: isOn } })
+    sharedChannels.get(`typing:${convId}`)?.ch.send({ type: 'broadcast', event: 'typing', payload: { user: uid(), on: isOn } })
   },
 
   // ---- გაცნობა
@@ -529,7 +564,7 @@ export const api = {
     ok(await sb.from('game_messages').insert({ game_id: id, user_id: uid(), kind, body }))
   },
   subscribeGameMessages(id, cb) {
-    const ch = sb.channel(`gm:${id}`)
+    const ch = pgChannel(`gm:${id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_messages', filter: `game_id=eq.${id}` }, async (p) => {
         const { data } = await sb.from('profiles').select(PERSON).eq('id', p.new.user_id).maybeSingle()
         cb({ ...p.new, p: data })
@@ -539,12 +574,23 @@ export const api = {
   },
   // ვინ უყურებს: Realtime presence (role: player | spectator)
   watchGame(id, role, onCount) {
-    const ch = sb.channel(`watch:${id}`, { config: { presence: { key: uid() } } })
-    ch.on('presence', { event: 'sync' }, () => {
-      const metas = Object.values(ch.presenceState()).map((list) => list[0])
-      onCount(metas.filter((m) => m?.role === 'spectator').length)
-    }).subscribe(async (st) => { if (st === 'SUBSCRIBED') await ch.track({ role }) })
-    return () => sb.removeChannel(ch)
+    const name = `watch:${id}`
+    const sub = { role, onCount }
+    const roleNow = (sh) => [...sh.subs].at(-1)?.role
+    const s = joinShared(name, { config: { presence: { key: uid() } } }, (sh) => {
+      sh.ch.on('presence', { event: 'sync' }, () => {
+        const metas = Object.values(sh.ch.presenceState()).map((list) => list[0])
+        const n = metas.filter((m) => m?.role === 'spectator').length
+        sh.subs.forEach((x) => x.onCount(n))
+      }).subscribe(async (st) => {
+        if (st !== 'SUBSCRIBED') return
+        sh.joined = true
+        if (roleNow(sh)) await sh.ch.track({ role: roleNow(sh) })
+      })
+    })
+    s.subs.add(sub)
+    if (s.joined) s.ch.track({ role })
+    return () => leaveShared(name, sub, (sh) => { if (sh.joined) sh.ch.untrack() })
   },
   async dailyPuzzle() { return ok(await sb.rpc('daily_puzzle')) },
   async puzzleMove(moves) { return ok(await sb.rpc('puzzle_move', { p_moves: moves })) },
@@ -558,7 +604,7 @@ export const api = {
     await gameFn({ op: 'resign', id })
   },
   subscribeGame(id, cb) {
-    const ch = sb.channel(`game:${id}`)
+    const ch = pgChannel(`game:${id}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${id}` }, () => cb())
       .subscribe()
     return () => sb.removeChannel(ch)
@@ -599,7 +645,7 @@ export const api = {
     return ok(await sb.from('tournaments').insert({ ...data, created_by: uid() }).select().single())
   },
   subscribeTournament(id, cb) {
-    const ch = sb.channel(`tour:${id}`)
+    const ch = pgChannel(`tour:${id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tournament_players', filter: `tournament_id=eq.${id}` }, () => cb())
       .subscribe()
     return () => sb.removeChannel(ch)
